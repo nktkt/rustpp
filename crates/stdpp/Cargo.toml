@@ -1,0 +1,9 @@
+[package]
+name = "stdpp"
+description = "Standard library extensions for the Rust++ MVP."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+rustpp-attributes = { path = "../rustpp-attributes" }

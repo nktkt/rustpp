@@ -1,0 +1,17 @@
+contract type PositiveMoney = i64 where |value| *value > 0;
+
+protocol Repository {
+    fn len(&self) -> usize;
+}
+
+component Service<R: Repository> {
+    repo: R,
+}
+
+async fn charge(amount: i64) -> Result<u64>
+    effects(Db, Time)
+    requires amount > 0
+    ensures result.is_ok()
+{
+    Ok(amount as u64)
+}

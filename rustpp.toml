@@ -1,0 +1,3 @@
+[policy]
+deny_unsafe = true
+deny_effects = ["Net"]

@@ -1,0 +1,9 @@
+[package]
+name = "rustpp-attributes"
+description = "Attribute macros for the Rust++ MVP."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+proc-macro = true
