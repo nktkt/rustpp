@@ -47,7 +47,7 @@ fn main() -> ExitCode {
 
 fn print_help() {
     println!(
-        "Rust++ MVP tooling\n\nUSAGE:\n    rpp <command>\n\nCOMMANDS:\n    new <name>                  Create a Rust++ MVP project\n    ci [--report F]             Run policy, check, test, and report\n    check [--no-policy] [args]  Enforce policy, then run cargo check\n    test [args...]              Run cargo test\n    build [args...]             Run cargo build\n    audit [--json] [path]       Report unsafe usage and unsafe boundaries\n    effects [--json] [--deny A,B] [path]\n                                Report and optionally deny effects\n    policy [--config F] [path]  Enforce rustpp.toml policy\n    sbom [--json] [Cargo.lock]  Emit a minimal dependency SBOM\n    report [path]               Emit a JSON audit/effect/policy/SBOM report\n    migrate [--json] [path]     Suggest scan-only Rust++ migration candidates\n    prove [--json] [path]       Inventory contract annotations\n    lower <file.rpp>            Lower Rust++ syntax preview to Rust\n    expand <file>               Print the current lowering view\n"
+        "Rust++ MVP tooling\n\nUSAGE:\n    rpp <command>\n\nCOMMANDS:\n    new <name>                  Create a Rust++ MVP project\n    ci [--report F]             Run policy, check, test, and report\n    check [--no-policy] [args]  Enforce policy, then run cargo check\n    test [args...]              Run cargo test\n    build [args...]             Run cargo build\n    audit [--json] [path]       Report unsafe usage and unsafe boundaries\n    effects [--json] [--deny A,B] [path]\n                                Report and optionally deny effects\n    policy [--json] [--config F] [path]\n                                Enforce rustpp.toml policy\n    sbom [--json] [Cargo.lock]  Emit a minimal dependency SBOM\n    report [path]               Emit a JSON audit/effect/policy/SBOM report\n    migrate [--json] [path]     Suggest scan-only Rust++ migration candidates\n    prove [--json] [path]       Inventory contract annotations\n    lower <file.rpp>            Lower Rust++ syntax preview to Rust\n    expand <file>               Print the current lowering view\n"
     );
 }
 
@@ -1022,11 +1022,15 @@ fn print_json_effect_inventory(
 fn policy(args: Vec<String>) -> ExitCode {
     let mut config_path = PathBuf::from("rustpp.toml");
     let mut root = PathBuf::from(".");
+    let mut json = false;
     let mut index = 0;
 
     while index < args.len() {
         let arg = &args[index];
-        if arg == "--config" {
+        if arg == "--json" {
+            json = true;
+            index += 1;
+        } else if arg == "--config" {
             let Some(value) = args.get(index + 1) else {
                 eprintln!("rpp policy: --config requires a file path");
                 return ExitCode::FAILURE;
@@ -1042,20 +1046,89 @@ fn policy(args: Vec<String>) -> ExitCode {
         }
     }
 
-    match enforce_policy(&root, &config_path) {
-        Ok(0) => {
-            println!("rpp policy: passed");
-            ExitCode::SUCCESS
-        }
-        Ok(violations) => {
-            eprintln!("rpp policy: {violations} violation(s)");
-            ExitCode::from(2)
+    match evaluate_policy(&root, &config_path) {
+        Ok((config, violations)) => {
+            if json {
+                print_json_policy_inventory(&root, &config_path, &config, &violations);
+            } else {
+                print_text_policy_result(&violations);
+            }
+
+            if violations.is_empty() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(2)
+            }
         }
         Err(error) => {
             eprintln!("rpp policy: {}: {error}", config_path.display());
             ExitCode::FAILURE
         }
     }
+}
+
+fn print_text_policy_result(violations: &[PolicyViolation]) {
+    if violations.is_empty() {
+        println!("rpp policy: passed");
+        return;
+    }
+
+    for violation in violations {
+        eprintln!(
+            "rpp policy: {} at {}:{}: {}",
+            violation.kind,
+            violation.path.display(),
+            violation.line,
+            violation.detail
+        );
+    }
+    eprintln!("rpp policy: {} violation(s)", violations.len());
+}
+
+fn print_json_policy_inventory(
+    root: &Path,
+    config_path: &Path,
+    config: &PolicyConfig,
+    violations: &[PolicyViolation],
+) {
+    println!("{{");
+    println!("  \"format\": \"rustpp-policy-v0\",");
+    println!(
+        "  \"status\": \"{}\",",
+        if violations.is_empty() {
+            "pass"
+        } else {
+            "fail"
+        }
+    );
+    println!(
+        "  \"root\": \"{}\",",
+        json_escape(&root.display().to_string())
+    );
+    println!(
+        "  \"config\": \"{}\",",
+        json_escape(&config_path.display().to_string())
+    );
+    println!("  \"settings\": {{");
+    println!("    \"deny_unsafe\": {},", config.deny_unsafe);
+    println!(
+        "    \"deny_effects\": [{}],",
+        config
+            .deny_effects
+            .iter()
+            .map(|effect| format!("\"{}\"", json_escape(effect)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    println!(
+        "    \"min_contract_annotations\": {}",
+        config.min_contract_annotations
+    );
+    println!("  }},");
+    println!("  \"violations\": [");
+    print_json_policy_violations(violations, "    ");
+    println!("  ]");
+    println!("}}");
 }
 
 fn sbom(args: Vec<String>) -> ExitCode {
@@ -1309,6 +1382,12 @@ fn print_json_effect_report(findings: &[EffectFinding]) {
 fn print_json_policy_report(violations: &[PolicyViolation]) {
     println!("  \"policy\": {{");
     println!("    \"violations\": [");
+    print_json_policy_violations(violations, "      ");
+    println!("    ]");
+    println!("  }},");
+}
+
+fn print_json_policy_violations(violations: &[PolicyViolation], indent: &str) {
     for (index, violation) in violations.iter().enumerate() {
         let comma = if index + 1 == violations.len() {
             ""
@@ -1316,7 +1395,7 @@ fn print_json_policy_report(violations: &[PolicyViolation]) {
             ","
         };
         println!(
-            "      {{ \"kind\": \"{}\", \"path\": \"{}\", \"line\": {}, \"detail\": \"{}\" }}{}",
+            "{indent}{{ \"kind\": \"{}\", \"path\": \"{}\", \"line\": {}, \"detail\": \"{}\" }}{}",
             json_escape(&violation.kind),
             json_escape(&violation.path.display().to_string()),
             violation.line,
@@ -1324,8 +1403,6 @@ fn print_json_policy_report(violations: &[PolicyViolation]) {
             comma
         );
     }
-    println!("    ]");
-    println!("  }},");
 }
 
 fn print_json_packages(packages: &[SbomPackage]) {
@@ -1496,8 +1573,7 @@ fn enforce_policy_if_present(root: &Path, config_path: &Path) -> Result<(), Chec
 }
 
 fn enforce_policy(root: &Path, config_path: &Path) -> io::Result<usize> {
-    let config = load_policy_config(config_path)?;
-    let violations = collect_policy_violations(root, &config)?;
+    let (_, violations) = evaluate_policy(root, config_path)?;
 
     for violation in &violations {
         eprintln!(
@@ -1510,6 +1586,15 @@ fn enforce_policy(root: &Path, config_path: &Path) -> io::Result<usize> {
     }
 
     Ok(violations.len())
+}
+
+fn evaluate_policy(
+    root: &Path,
+    config_path: &Path,
+) -> io::Result<(PolicyConfig, Vec<PolicyViolation>)> {
+    let config = load_policy_config(config_path)?;
+    let violations = collect_policy_violations(root, &config)?;
+    Ok((config, violations))
 }
 
 fn collect_policy_violations(
@@ -2534,6 +2619,35 @@ mod tests {
 
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].kind, "contract");
+    }
+
+    #[test]
+    fn evaluates_policy_with_config_file() {
+        let root = env::temp_dir().join(format!(
+            "rustpp-policy-evaluate-test-{}",
+            std::process::id()
+        ));
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join("lib.rs"),
+            "#[requires(value > 0)]\npub fn double(value: i32) -> i32 { value * 2 }\n",
+        )
+        .unwrap();
+        let config_path = root.join("rustpp.toml");
+        fs::write(
+            &config_path,
+            "[policy]\ndeny_unsafe = true\ndeny_effects = [\"Net\"]\nmin_contract_annotations = 1\n",
+        )
+        .unwrap();
+
+        let (config, violations) = evaluate_policy(&root, &config_path).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        assert!(config.deny_unsafe);
+        assert_eq!(config.deny_effects, ["Net"]);
+        assert_eq!(config.min_contract_annotations, 1);
+        assert!(violations.is_empty());
     }
 
     #[test]

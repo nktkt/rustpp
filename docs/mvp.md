@@ -26,6 +26,7 @@ cargo run -p rpp --bin rpp -- effects --json .
 cargo run -p rpp --bin rpp -- effects --deny Db .
 cargo run -p rpp --bin rpp -- effects --json --deny Db .
 cargo run -p rpp --bin rpp -- policy .
+cargo run -p rpp --bin rpp -- policy --json .
 cargo run -p rpp --bin rpp -- sbom
 cargo run -p rpp --bin rpp -- report .
 cargo run -p rpp --bin rpp -- migrate examples/payment_service
@@ -131,6 +132,8 @@ min_contract_annotations = 1
 ```
 
 The MVP parser intentionally supports only these keys. That keeps the policy format small while still making generated code and CI checks explicit. `min_contract_annotations` fails the policy check when the scanned source tree has fewer contract annotations than the configured minimum.
+
+Use `--json` to emit a standalone `rustpp-policy-v0` document with policy settings, violations, and pass/fail status.
 
 ## SBOM
 

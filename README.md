@@ -133,6 +133,7 @@ cargo run -p rpp --bin rpp -- effects --json --deny Net .
 
 # Policy enforcement
 cargo run -p rpp --bin rpp -- policy .
+cargo run -p rpp --bin rpp -- policy --json .
 
 # Minimal SBOM from Cargo.lock
 cargo run -p rpp --bin rpp -- sbom
