@@ -20,8 +20,11 @@ cargo run -p rpp --bin rpp -- check -- --workspace
 cargo test --workspace
 cargo run -p payment_service
 cargo run -p rpp --bin rpp -- audit .
+cargo run -p rpp --bin rpp -- audit --json .
 cargo run -p rpp --bin rpp -- effects .
+cargo run -p rpp --bin rpp -- effects --json .
 cargo run -p rpp --bin rpp -- effects --deny Db .
+cargo run -p rpp --bin rpp -- effects --json --deny Db .
 cargo run -p rpp --bin rpp -- policy .
 cargo run -p rpp --bin rpp -- sbom
 cargo run -p rpp --bin rpp -- report .
@@ -114,6 +117,8 @@ cargo run -p rpp --bin rpp -- effects --deny Net .
 
 If a denied effect is present, the command exits with status code `2`, which is intended for CI policy checks.
 
+Use `--json` to emit the same inventory plus denied-effect matches as `rustpp-effects-v0`.
+
 ## Policy File
 
 `rpp policy` reads `rustpp.toml` and enforces the first trust policy surface:
@@ -192,6 +197,8 @@ fn ffi_boundary_placeholder() {}
 ```
 
 Boundary annotations must include both `reason` and `audit`; missing metadata is treated as an audit failure. Valid boundary metadata is reported without failing the command unless direct unsafe usage is also found.
+
+Use `--json` to emit a standalone `rustpp-audit-v0` document with unsafe findings, unsafe boundaries, metadata errors, and pass/fail status.
 
 ## `.rpp` Lowering Preview
 

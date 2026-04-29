@@ -123,10 +123,13 @@ cargo run -p rpp --bin rpp -- check --no-policy -- --workspace
 
 # Unsafe keyword and unsafe boundary metadata audit
 cargo run -p rpp --bin rpp -- audit .
+cargo run -p rpp --bin rpp -- audit --json .
 
 # Effect inventory and deny-list check
 cargo run -p rpp --bin rpp -- effects .
+cargo run -p rpp --bin rpp -- effects --json .
 cargo run -p rpp --bin rpp -- effects --deny Net .
+cargo run -p rpp --bin rpp -- effects --json --deny Net .
 
 # Policy enforcement
 cargo run -p rpp --bin rpp -- policy .

@@ -13,22 +13,7 @@ fn main() -> ExitCode {
     };
 
     match command.as_str() {
-        "audit" => {
-            let root = args.next().unwrap_or_else(|| ".".to_string());
-            match audit(Path::new(&root)) {
-                Ok(has_unsafe_keyword) => {
-                    if has_unsafe_keyword {
-                        ExitCode::from(2)
-                    } else {
-                        ExitCode::SUCCESS
-                    }
-                }
-                Err(error) => {
-                    eprintln!("rpp audit: {error}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
+        "audit" => audit(args.collect()),
         "ci" => ci(args.collect()),
         "check" => rpp_check(args.collect()),
         "test" => run_cargo("test", args.collect()),
@@ -62,7 +47,7 @@ fn main() -> ExitCode {
 
 fn print_help() {
     println!(
-        "Rust++ MVP tooling\n\nUSAGE:\n    rpp <command>\n\nCOMMANDS:\n    new <name>                  Create a Rust++ MVP project\n    ci [--report F]             Run policy, check, test, and report\n    check [--no-policy] [args]  Enforce policy, then run cargo check\n    test [args...]              Run cargo test\n    build [args...]             Run cargo build\n    audit [path]                Report unsafe usage and unsafe boundaries\n    effects [--deny A,B] [path] Report and optionally deny effects\n    policy [--config F] [path]  Enforce rustpp.toml policy\n    sbom [--json] [Cargo.lock]  Emit a minimal dependency SBOM\n    report [path]               Emit a JSON audit/effect/policy/SBOM report\n    migrate [--json] [path]     Suggest scan-only Rust++ migration candidates\n    prove [--json] [path]       Inventory contract annotations\n    lower <file.rpp>            Lower Rust++ syntax preview to Rust\n    expand <file>               Print the current lowering view\n"
+        "Rust++ MVP tooling\n\nUSAGE:\n    rpp <command>\n\nCOMMANDS:\n    new <name>                  Create a Rust++ MVP project\n    ci [--report F]             Run policy, check, test, and report\n    check [--no-policy] [args]  Enforce policy, then run cargo check\n    test [args...]              Run cargo test\n    build [args...]             Run cargo build\n    audit [--json] [path]       Report unsafe usage and unsafe boundaries\n    effects [--json] [--deny A,B] [path]\n                                Report and optionally deny effects\n    policy [--config F] [path]  Enforce rustpp.toml policy\n    sbom [--json] [Cargo.lock]  Emit a minimal dependency SBOM\n    report [path]               Emit a JSON audit/effect/policy/SBOM report\n    migrate [--json] [path]     Suggest scan-only Rust++ migration candidates\n    prove [--json] [path]       Inventory contract annotations\n    lower <file.rpp>            Lower Rust++ syntax preview to Rust\n    expand <file>               Print the current lowering view\n"
     );
 }
 
@@ -287,10 +272,38 @@ fn rpp_check(args: Vec<String>) -> ExitCode {
     run_cargo("check", cargo_args)
 }
 
-fn audit(root: &Path) -> io::Result<bool> {
-    let mut report = AuditReport::default();
-    collect_audit_report(root, &mut report)?;
+fn audit(args: Vec<String>) -> ExitCode {
+    let mut root = PathBuf::from(".");
+    let mut json = false;
 
+    for arg in args {
+        if arg == "--json" {
+            json = true;
+        } else {
+            root = PathBuf::from(arg);
+        }
+    }
+
+    let mut report = AuditReport::default();
+    if let Err(error) = collect_audit_report(&root, &mut report) {
+        eprintln!("rpp audit: {error}");
+        return ExitCode::FAILURE;
+    }
+
+    if json {
+        print_json_audit_inventory(&report);
+    } else {
+        print_text_audit_report(&report);
+    }
+
+    if audit_report_failed(&report) {
+        ExitCode::from(2)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn print_text_audit_report(report: &AuditReport) {
     if report.unsafe_findings.is_empty() {
         println!("rpp audit: no unsafe usage found");
     } else {
@@ -329,8 +342,73 @@ fn audit(root: &Path) -> io::Result<bool> {
             );
         }
     }
+}
 
-    Ok(!report.unsafe_findings.is_empty() || !report.metadata_errors.is_empty())
+fn audit_report_failed(report: &AuditReport) -> bool {
+    !report.unsafe_findings.is_empty() || !report.metadata_errors.is_empty()
+}
+
+fn print_json_audit_inventory(report: &AuditReport) {
+    println!("{{");
+    println!("  \"format\": \"rustpp-audit-v0\",");
+    println!(
+        "  \"status\": \"{}\",",
+        if audit_report_failed(report) {
+            "fail"
+        } else {
+            "pass"
+        }
+    );
+    println!("  \"unsafe_findings\": [");
+    for (index, finding) in report.unsafe_findings.iter().enumerate() {
+        let comma = if index + 1 == report.unsafe_findings.len() {
+            ""
+        } else {
+            ","
+        };
+        println!(
+            "    {{ \"path\": \"{}\", \"line\": {}, \"text\": \"{}\" }}{}",
+            json_escape(&finding.path.display().to_string()),
+            finding.line,
+            json_escape(finding.text.trim()),
+            comma
+        );
+    }
+    println!("  ],");
+    println!("  \"unsafe_boundaries\": [");
+    for (index, boundary) in report.boundaries.iter().enumerate() {
+        let comma = if index + 1 == report.boundaries.len() {
+            ""
+        } else {
+            ","
+        };
+        println!(
+            "    {{ \"path\": \"{}\", \"line\": {}, \"reason\": \"{}\", \"audit\": \"{}\" }}{}",
+            json_escape(&boundary.path.display().to_string()),
+            boundary.line,
+            json_escape(&boundary.reason),
+            json_escape(&boundary.audit),
+            comma
+        );
+    }
+    println!("  ],");
+    println!("  \"metadata_errors\": [");
+    for (index, finding) in report.metadata_errors.iter().enumerate() {
+        let comma = if index + 1 == report.metadata_errors.len() {
+            ""
+        } else {
+            ","
+        };
+        println!(
+            "    {{ \"path\": \"{}\", \"line\": {}, \"text\": \"{}\" }}{}",
+            json_escape(&finding.path.display().to_string()),
+            finding.line,
+            json_escape(finding.text.trim()),
+            comma
+        );
+    }
+    println!("  ]");
+    println!("}}");
 }
 
 fn collect_audit_findings(path: &Path, findings: &mut Vec<Finding>) -> io::Result<()> {
@@ -775,11 +853,15 @@ const PRIMITIVE_PARAMETER_TYPES: &[&str] = &[
 fn effects(args: Vec<String>) -> ExitCode {
     let mut root = PathBuf::from(".");
     let mut denied = Vec::new();
+    let mut json = false;
     let mut index = 0;
 
     while index < args.len() {
         let arg = &args[index];
-        if arg == "--deny" {
+        if arg == "--json" {
+            json = true;
+            index += 1;
+        } else if arg == "--deny" {
             let Some(value) = args.get(index + 1) else {
                 eprintln!("rpp effects: --deny requires a comma-separated value");
                 return ExitCode::FAILURE;
@@ -797,7 +879,7 @@ fn effects(args: Vec<String>) -> ExitCode {
 
     let mut findings = Vec::new();
     match collect_effect_findings(&root, &mut findings) {
-        Ok(()) => report_effects(&findings, &denied),
+        Ok(()) => report_effects(&findings, &denied, json),
         Err(error) => {
             eprintln!("rpp effects: {error}");
             ExitCode::FAILURE
@@ -815,7 +897,18 @@ fn extend_denied_effects(denied: &mut Vec<String>, value: &str) {
     );
 }
 
-fn report_effects(findings: &[EffectFinding], denied: &[String]) -> ExitCode {
+fn report_effects(findings: &[EffectFinding], denied: &[String], json: bool) -> ExitCode {
+    let denied_findings = denied_effect_findings(findings, denied);
+
+    if json {
+        print_json_effect_inventory(findings, denied, &denied_findings);
+        return if denied_findings.is_empty() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(2)
+        };
+    }
+
     if findings.is_empty() {
         println!("rpp effects: no effect annotations found");
         return ExitCode::SUCCESS;
@@ -831,25 +924,99 @@ fn report_effects(findings: &[EffectFinding], denied: &[String]) -> ExitCode {
         );
     }
 
-    let mut denied_findings = Vec::new();
-    for finding in findings {
-        for effect in &finding.effects {
-            if denied.iter().any(|denied| denied == effect) {
-                denied_findings.push((finding, effect));
-            }
-        }
-    }
-
     if denied_findings.is_empty() {
         return ExitCode::SUCCESS;
     }
 
     eprintln!("rpp effects: denied effect usage found");
-    for (finding, effect) in denied_findings {
-        eprintln!("{}:{}: {effect}", finding.path.display(), finding.line);
+    for finding in denied_findings {
+        eprintln!(
+            "{}:{}: {}",
+            finding.path.display(),
+            finding.line,
+            finding.effect
+        );
     }
 
     ExitCode::from(2)
+}
+
+fn denied_effect_findings(
+    findings: &[EffectFinding],
+    denied: &[String],
+) -> Vec<DeniedEffectFinding> {
+    let mut denied_findings = Vec::new();
+    for finding in findings {
+        for effect in &finding.effects {
+            if denied.iter().any(|denied| denied == effect) {
+                denied_findings.push(DeniedEffectFinding {
+                    path: finding.path.clone(),
+                    line: finding.line,
+                    effect: effect.clone(),
+                });
+            }
+        }
+    }
+    denied_findings
+}
+
+fn print_json_effect_inventory(
+    findings: &[EffectFinding],
+    denied: &[String],
+    denied_findings: &[DeniedEffectFinding],
+) {
+    println!("{{");
+    println!("  \"format\": \"rustpp-effects-v0\",");
+    println!(
+        "  \"status\": \"{}\",",
+        if denied_findings.is_empty() {
+            "pass"
+        } else {
+            "fail"
+        }
+    );
+    println!(
+        "  \"denied\": [{}],",
+        denied
+            .iter()
+            .map(|effect| format!("\"{}\"", json_escape(effect)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    println!("  \"annotations\": [");
+    for (index, finding) in findings.iter().enumerate() {
+        let comma = if index + 1 == findings.len() { "" } else { "," };
+        println!(
+            "    {{ \"path\": \"{}\", \"line\": {}, \"effects\": [{}] }}{}",
+            json_escape(&finding.path.display().to_string()),
+            finding.line,
+            finding
+                .effects
+                .iter()
+                .map(|effect| format!("\"{}\"", json_escape(effect)))
+                .collect::<Vec<_>>()
+                .join(", "),
+            comma
+        );
+    }
+    println!("  ],");
+    println!("  \"denied_findings\": [");
+    for (index, finding) in denied_findings.iter().enumerate() {
+        let comma = if index + 1 == denied_findings.len() {
+            ""
+        } else {
+            ","
+        };
+        println!(
+            "    {{ \"path\": \"{}\", \"line\": {}, \"effect\": \"{}\" }}{}",
+            json_escape(&finding.path.display().to_string()),
+            finding.line,
+            json_escape(&finding.effect),
+            comma
+        );
+    }
+    println!("  ]");
+    println!("}}");
 }
 
 fn policy(args: Vec<String>) -> ExitCode {
@@ -2100,6 +2267,13 @@ struct EffectFinding {
 }
 
 #[derive(Debug, Eq, PartialEq)]
+struct DeniedEffectFinding {
+    path: PathBuf,
+    line: usize,
+    effect: String,
+}
+
+#[derive(Debug, Eq, PartialEq)]
 struct SbomPackage {
     name: String,
     version: String,
@@ -2230,6 +2404,23 @@ mod tests {
     }
 
     #[test]
+    fn detects_denied_effect_findings() {
+        let findings = [EffectFinding {
+            path: PathBuf::from("src/lib.rs"),
+            line: 7,
+            effects: vec!["Db".to_string(), "Net".to_string()],
+        }];
+        let denied = ["Net".to_string()];
+
+        let denied_findings = denied_effect_findings(&findings, &denied);
+
+        assert_eq!(denied_findings.len(), 1);
+        assert_eq!(denied_findings[0].path, PathBuf::from("src/lib.rs"));
+        assert_eq!(denied_findings[0].line, 7);
+        assert_eq!(denied_findings[0].effect, "Net");
+    }
+
+    #[test]
     fn detects_unsafe_keyword_without_identifier_noise() {
         assert!(contains_unsafe_keyword("unsafe { call() }"));
         assert!(!contains_unsafe_keyword("fn unsafe_boundary() {}"));
@@ -2249,6 +2440,27 @@ mod tests {
                 .expect("boundary should be recognized")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn audit_report_failure_tracks_unsafe_and_metadata_errors() {
+        let mut report = AuditReport::default();
+        assert!(!audit_report_failed(&report));
+
+        report.unsafe_findings.push(Finding {
+            path: PathBuf::from("src/lib.rs"),
+            line: 1,
+            text: "unsafe { call() }".to_string(),
+        });
+        assert!(audit_report_failed(&report));
+
+        report.unsafe_findings.clear();
+        report.metadata_errors.push(Finding {
+            path: PathBuf::from("src/lib.rs"),
+            line: 2,
+            text: "missing metadata".to_string(),
+        });
+        assert!(audit_report_failed(&report));
     }
 
     #[test]
