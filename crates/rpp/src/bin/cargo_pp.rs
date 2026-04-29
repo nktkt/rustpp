@@ -29,6 +29,7 @@ fn is_rpp_command(command: &str) -> bool {
             | "effects"
             | "expand"
             | "lower"
+            | "migrate"
             | "new"
             | "policy"
             | "prove"

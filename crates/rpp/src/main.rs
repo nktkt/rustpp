@@ -47,10 +47,7 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        "migrate" => {
-            println!("rpp migrate: scan-only migration is not implemented yet");
-            ExitCode::SUCCESS
-        }
+        "migrate" => migrate(args.collect()),
         "help" | "--help" | "-h" => {
             print_help();
             ExitCode::SUCCESS
@@ -65,7 +62,7 @@ fn main() -> ExitCode {
 
 fn print_help() {
     println!(
-        "Rust++ MVP tooling\n\nUSAGE:\n    rpp <command>\n\nCOMMANDS:\n    new <name>                  Create a Rust++ MVP project\n    ci [--report F]             Run policy, check, test, and report\n    check [--no-policy] [args]  Enforce policy, then run cargo check\n    test [args...]              Run cargo test\n    build [args...]             Run cargo build\n    audit [path]                Report unsafe usage and unsafe boundaries\n    effects [--deny A,B] [path] Report and optionally deny effects\n    policy [--config F] [path]  Enforce rustpp.toml policy\n    sbom [--json] [Cargo.lock]  Emit a minimal dependency SBOM\n    report [path]               Emit a JSON audit/effect/policy/SBOM report\n    prove [path]                Count contract annotations\n    lower <file.rpp>            Lower Rust++ syntax preview to Rust\n    expand <file>               Print the current lowering view\n"
+        "Rust++ MVP tooling\n\nUSAGE:\n    rpp <command>\n\nCOMMANDS:\n    new <name>                  Create a Rust++ MVP project\n    ci [--report F]             Run policy, check, test, and report\n    check [--no-policy] [args]  Enforce policy, then run cargo check\n    test [args...]              Run cargo test\n    build [args...]             Run cargo build\n    audit [path]                Report unsafe usage and unsafe boundaries\n    effects [--deny A,B] [path] Report and optionally deny effects\n    policy [--config F] [path]  Enforce rustpp.toml policy\n    sbom [--json] [Cargo.lock]  Emit a minimal dependency SBOM\n    report [path]               Emit a JSON audit/effect/policy/SBOM report\n    migrate [--json] [path]     Suggest scan-only Rust++ migration candidates\n    prove [path]                Count contract annotations\n    lower <file.rpp>            Lower Rust++ syntax preview to Rust\n    expand <file>               Print the current lowering view\n"
     );
 }
 
@@ -469,6 +466,299 @@ fn prove(root: String) -> ExitCode {
         }
     }
 }
+
+fn migrate(args: Vec<String>) -> ExitCode {
+    let mut root = PathBuf::from(".");
+    let mut json = false;
+
+    for arg in args {
+        if arg == "--json" {
+            json = true;
+        } else {
+            root = PathBuf::from(arg);
+        }
+    }
+
+    let mut findings = Vec::new();
+    if let Err(error) = collect_migration_findings(&root, &mut findings) {
+        eprintln!("rpp migrate: {error}");
+        return ExitCode::FAILURE;
+    }
+
+    if json {
+        print_json_migration_findings(&findings);
+    } else {
+        print_text_migration_findings(&findings);
+    }
+
+    ExitCode::SUCCESS
+}
+
+fn collect_migration_findings(path: &Path, findings: &mut Vec<MigrationFinding>) -> io::Result<()> {
+    if should_skip(path) {
+        return Ok(());
+    }
+
+    let metadata = fs::metadata(path)?;
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path)? {
+            collect_migration_findings(&entry?.path(), findings)?;
+        }
+        return Ok(());
+    }
+
+    if path.extension().and_then(OsStr::to_str) != Some("rs") {
+        return Ok(());
+    }
+
+    let source = fs::read_to_string(path)?;
+    let mut attributes = Vec::new();
+    let mut refined_type_depth = None;
+    for (index, line) in source.lines().enumerate() {
+        let trimmed = line.trim_start();
+        let starts_refined_type =
+            refined_type_depth.is_none() && trimmed.starts_with("refined_type!");
+        let inside_refined_type = refined_type_depth.is_some() || starts_refined_type;
+
+        if trimmed.starts_with("#[") {
+            attributes.push(trimmed.to_string());
+            update_refined_type_depth(&mut refined_type_depth, trimmed, starts_refined_type);
+            continue;
+        }
+
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            update_refined_type_depth(&mut refined_type_depth, trimmed, starts_refined_type);
+            continue;
+        }
+
+        collect_migration_line_findings(
+            path,
+            index + 1,
+            line,
+            &attributes,
+            inside_refined_type,
+            findings,
+        );
+        attributes.clear();
+        update_refined_type_depth(&mut refined_type_depth, trimmed, starts_refined_type);
+    }
+
+    Ok(())
+}
+
+fn update_refined_type_depth(depth: &mut Option<usize>, line: &str, starts_refined_type: bool) {
+    if starts_refined_type && depth.is_none() {
+        *depth = Some(0);
+    }
+
+    let Some(current) = *depth else {
+        return;
+    };
+
+    let open_braces = line.chars().filter(|character| *character == '{').count();
+    let close_braces = line.chars().filter(|character| *character == '}').count();
+    let next = current
+        .saturating_add(open_braces)
+        .saturating_sub(close_braces);
+
+    if next == 0 && (open_braces > 0 || close_braces > 0) {
+        *depth = None;
+    } else {
+        *depth = Some(next);
+    }
+}
+
+fn collect_migration_line_findings(
+    path: &Path,
+    line: usize,
+    source_line: &str,
+    attributes: &[String],
+    inside_refined_type: bool,
+    findings: &mut Vec<MigrationFinding>,
+) {
+    if inside_refined_type {
+        return;
+    }
+
+    let trimmed = source_line.trim_start();
+    let has_attribute = |name: &str| attributes.iter().any(|attr| attr.starts_with(name));
+
+    if contains_unsafe_keyword(source_line) && !has_attribute("#[unsafe_boundary") {
+        findings.push(MigrationFinding {
+            path: path.to_path_buf(),
+            line,
+            kind: "unsafe-boundary".to_string(),
+            detail: "unsafe keyword is visible without unsafe boundary metadata".to_string(),
+            suggestion: "Add #[unsafe_boundary(reason = \"...\", audit = \"YYYY-MM\")] to the boundary or wrapper.".to_string(),
+        });
+    }
+
+    if let Some(name) = declaration_name(trimmed, "struct") {
+        if !has_attribute("#[component") {
+            if is_component_candidate_struct(trimmed) {
+                findings.push(MigrationFinding {
+                    path: path.to_path_buf(),
+                    line,
+                    kind: "component".to_string(),
+                    detail: format!("struct `{name}` may be a Rust++ component candidate"),
+                    suggestion: format!("Consider #[component] on `{name}` if it owns state, dependencies, or lifecycle."),
+                });
+            }
+        }
+    }
+
+    if let Some(name) = declaration_name(trimmed, "trait") {
+        findings.push(MigrationFinding {
+            path: path.to_path_buf(),
+            line,
+            kind: "protocol".to_string(),
+            detail: format!("trait `{name}` may be a Rust++ protocol candidate"),
+            suggestion: format!(
+                "Consider `protocol {name}` in .rpp if the trait represents an API contract."
+            ),
+        });
+    }
+
+    if is_async_function_signature(trimmed) && !has_attribute("#[effects") {
+        findings.push(MigrationFinding {
+            path: path.to_path_buf(),
+            line,
+            kind: "effect".to_string(),
+            detail: "async function has no Rust++ effect annotation".to_string(),
+            suggestion: "Add #[effects(...)] or .rpp `effects(...)` once the IO/capability surface is known.".to_string(),
+        });
+    }
+
+    if let Some((name, inner)) = primitive_type_alias(trimmed) {
+        findings.push(MigrationFinding {
+            path: path.to_path_buf(),
+            line,
+            kind: "refinement-type".to_string(),
+            detail: format!("type alias `{name}` wraps primitive `{inner}`"),
+            suggestion: format!(
+                "Consider `contract type {name} = {inner} where |value| ...;` or refined_type!."
+            ),
+        });
+    }
+
+    if function_has_primitive_domain_parameter(trimmed) {
+        findings.push(MigrationFinding {
+            path: path.to_path_buf(),
+            line,
+            kind: "refinement-parameter".to_string(),
+            detail: "function signature contains primitive domain parameter names".to_string(),
+            suggestion:
+                "Consider replacing raw amount/count/size/id primitives with refined domain types."
+                    .to_string(),
+        });
+    }
+}
+
+fn declaration_name(line: &str, keyword: &str) -> Option<String> {
+    let rest = line.strip_prefix(keyword)?.trim_start();
+    let name: String = rest
+        .chars()
+        .take_while(|character| *character == '_' || character.is_ascii_alphanumeric())
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+fn is_component_candidate_struct(line: &str) -> bool {
+    let before_body = line.split_once('{').map_or(line, |(head, _)| head);
+    !before_body.contains('(') && !line.trim_end().ends_with(';')
+}
+
+fn is_async_function_signature(line: &str) -> bool {
+    line.starts_with("async fn ") || line.contains(" async fn ")
+}
+
+fn primitive_type_alias(line: &str) -> Option<(String, String)> {
+    let rest = line.strip_prefix("type ")?;
+    let (name, rhs) = rest.split_once('=')?;
+    let name = name.trim();
+    let inner = rhs.trim().trim_end_matches(';').trim();
+
+    if is_identifier(name) && is_primitive_domain_type(inner) {
+        Some((name.to_string(), inner.to_string()))
+    } else {
+        None
+    }
+}
+
+fn is_primitive_domain_type(value: &str) -> bool {
+    matches!(
+        value,
+        "String"
+            | "str"
+            | "usize"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+    )
+}
+
+fn function_has_primitive_domain_parameter(line: &str) -> bool {
+    (line.starts_with("fn ") || line.starts_with("async fn ") || line.contains(" fn "))
+        && DOMAIN_PARAMETER_NAMES
+            .iter()
+            .any(|name| line.contains(&format!("{name}:")) || line.contains(&format!("{name}: ")))
+        && PRIMITIVE_PARAMETER_TYPES
+            .iter()
+            .any(|ty| line.contains(&format!(": {ty}")) || line.contains(&format!(":{ty}")))
+}
+
+fn print_text_migration_findings(findings: &[MigrationFinding]) {
+    if findings.is_empty() {
+        println!("rpp migrate: no migration candidates found");
+        return;
+    }
+
+    println!("rpp migrate: found {} candidate(s)", findings.len());
+    for finding in findings {
+        println!(
+            "{}:{}: [{}] {}",
+            finding.path.display(),
+            finding.line,
+            finding.kind,
+            finding.detail
+        );
+        println!("  suggestion: {}", finding.suggestion);
+    }
+}
+
+fn print_json_migration_findings(findings: &[MigrationFinding]) {
+    println!("{{");
+    println!("  \"format\": \"rustpp-migrate-v0\",");
+    println!("  \"candidates\": [");
+    for (index, finding) in findings.iter().enumerate() {
+        let comma = if index + 1 == findings.len() { "" } else { "," };
+        println!(
+            "    {{ \"path\": \"{}\", \"line\": {}, \"kind\": \"{}\", \"detail\": \"{}\", \"suggestion\": \"{}\" }}{}",
+            json_escape(&finding.path.display().to_string()),
+            finding.line,
+            json_escape(&finding.kind),
+            json_escape(&finding.detail),
+            json_escape(&finding.suggestion),
+            comma
+        );
+    }
+    println!("  ]");
+    println!("}}");
+}
+
+const DOMAIN_PARAMETER_NAMES: &[&str] = &["amount", "count", "size", "len", "id"];
+const PRIMITIVE_PARAMETER_TYPES: &[&str] = &[
+    "usize", "isize", "u8", "u16", "u32", "u64", "u128", "i8", "i16", "i32", "i64", "i128",
+    "String",
+];
 
 fn effects(args: Vec<String>) -> ExitCode {
     let mut root = PathBuf::from(".");
@@ -1608,6 +1898,15 @@ struct PolicyViolation {
     detail: String,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct MigrationFinding {
+    path: PathBuf,
+    line: usize,
+    kind: String,
+    detail: String,
+    suggestion: String,
+}
+
 struct CiConfig {
     root: PathBuf,
     config_path: PathBuf,
@@ -1798,6 +2097,93 @@ mod tests {
             parse_string_array("[\"Net\", \"Db\"]", 1).unwrap(),
             ["Net", "Db"]
         );
+    }
+
+    #[test]
+    fn detects_migration_candidates() {
+        let mut findings = Vec::new();
+        collect_migration_line_findings(
+            Path::new("src/lib.rs"),
+            1,
+            "type Money = i64;",
+            &[],
+            false,
+            &mut findings,
+        );
+        collect_migration_line_findings(
+            Path::new("src/lib.rs"),
+            2,
+            "async fn charge(amount: i64) -> Result<u64>",
+            &[],
+            false,
+            &mut findings,
+        );
+        collect_migration_line_findings(
+            Path::new("src/lib.rs"),
+            3,
+            "struct Service {",
+            &[],
+            false,
+            &mut findings,
+        );
+
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.kind == "refinement-type")
+        );
+        assert!(findings.iter().any(|finding| finding.kind == "effect"));
+        assert!(findings.iter().any(|finding| finding.kind == "component"));
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.kind == "refinement-parameter")
+        );
+    }
+
+    #[test]
+    fn migration_respects_existing_effect_attribute() {
+        let mut findings = Vec::new();
+        collect_migration_line_findings(
+            Path::new("src/lib.rs"),
+            1,
+            "async fn charge(amount: i64) -> Result<u64>",
+            &["#[effects(Db)]".to_string()],
+            false,
+            &mut findings,
+        );
+
+        assert!(!findings.iter().any(|finding| finding.kind == "effect"));
+    }
+
+    #[test]
+    fn migration_ignores_refined_type_macro_body() {
+        let mut findings = Vec::new();
+        collect_migration_line_findings(
+            Path::new("src/lib.rs"),
+            1,
+            "    struct PositiveMoney(Money) where |value| *value > 0;",
+            &[],
+            true,
+            &mut findings,
+        );
+
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn migration_ignores_tuple_struct_components() {
+        let mut findings = Vec::new();
+        collect_migration_line_findings(
+            Path::new("src/lib.rs"),
+            1,
+            "struct PaymentError(&'static str);",
+            &[],
+            false,
+            &mut findings,
+        );
+
+        assert!(!findings.iter().any(|finding| finding.kind == "component"));
     }
 
     #[test]

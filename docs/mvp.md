@@ -25,6 +25,8 @@ cargo run -p rpp --bin rpp -- effects --deny Db .
 cargo run -p rpp --bin rpp -- policy .
 cargo run -p rpp --bin rpp -- sbom
 cargo run -p rpp --bin rpp -- report .
+cargo run -p rpp --bin rpp -- migrate examples/payment_service
+cargo run -p rpp --bin rpp -- migrate --json examples/payment_service
 cargo run -p rpp --bin rpp -- lower examples/rpp/minimal.rpp
 cargo run -p rpp --bin rpp -- prove .
 cargo run -p rpp --bin cargo-pp -- pp check -- --workspace
@@ -150,6 +152,22 @@ cargo run -p rpp --bin cargo-pp -- pp report .
 ```
 
 The command exits with status code `2` if unsafe findings, unsafe boundary metadata errors, or policy violations are present.
+
+## Migration Scan
+
+`rpp migrate` is scan-only. It does not rewrite files; it reports places where ordinary Rust might benefit from Rust++ concepts:
+
+- `struct` declarations that may become `#[component]`
+- `trait` declarations that may become `protocol`
+- `async fn` signatures without effect annotations
+- primitive type aliases that may become refinement types
+- raw primitive domain parameters such as `amount`, `count`, `size`, `len`, or `id`
+- visible unsafe keyword usage without unsafe boundary metadata
+
+```bash
+cargo run -p rpp --bin rpp -- migrate examples/payment_service
+cargo run -p rpp --bin rpp -- migrate --json examples/payment_service
+```
 
 ## Unsafe Boundary Audit
 

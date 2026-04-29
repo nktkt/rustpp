@@ -138,6 +138,10 @@ cargo run -p rpp --bin rpp -- sbom --json
 # Combined JSON report
 cargo run -p rpp --bin rpp -- report .
 
+# Scan-only migration suggestions
+cargo run -p rpp --bin rpp -- migrate examples/payment_service
+cargo run -p rpp --bin rpp -- migrate --json examples/payment_service
+
 # Contract inventory
 cargo run -p rpp --bin rpp -- prove .
 
