@@ -24,6 +24,7 @@ fn is_rpp_command(command: &str) -> bool {
         command,
         "audit"
             | "build"
+            | "ci"
             | "check"
             | "effects"
             | "expand"

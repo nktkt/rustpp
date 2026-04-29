@@ -15,6 +15,7 @@ The MVP intentionally lowers to normal Rust. The contract macros currently gener
 ## Commands
 
 ```bash
+cargo run -p rpp --bin rpp -- ci --report rustpp-report.json
 cargo run -p rpp --bin rpp -- check -- --workspace
 cargo test --workspace
 cargo run -p payment_service
@@ -27,6 +28,13 @@ cargo run -p rpp --bin rpp -- report .
 cargo run -p rpp --bin rpp -- lower examples/rpp/minimal.rpp
 cargo run -p rpp --bin rpp -- prove .
 cargo run -p rpp --bin cargo-pp -- pp check -- --workspace
+cargo run -p rpp --bin cargo-pp -- pp ci --report rustpp-report.json
+```
+
+`rpp ci` is the single local and GitHub Actions entrypoint. It runs policy enforcement, `cargo check --workspace`, `cargo test --workspace`, and `rpp report`. With `--report`, it writes the combined JSON report to a file:
+
+```bash
+cargo run -p rpp --bin rpp -- ci --report rustpp-report.json
 ```
 
 `rpp check` enforces `rustpp.toml` first, then forwards remaining arguments to `cargo check`. Use `--no-policy` when you intentionally want the raw Cargo behavior:

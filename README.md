@@ -97,6 +97,7 @@ component Service<R: Repository> {
 ## Quick Start
 
 ```bash
+cargo run -p rpp --bin rpp -- ci --report rustpp-report.json
 cargo run -p rpp --bin rpp -- check -- --workspace
 cargo test --workspace
 cargo run -p payment_service
@@ -111,6 +112,9 @@ payment_id=1
 ## Tooling
 
 ```bash
+# Full local CI flow: policy, check, test, report
+cargo run -p rpp --bin rpp -- ci --report rustpp-report.json
+
 # Enforce rustpp.toml policy, then run cargo check
 cargo run -p rpp --bin rpp -- check -- --workspace
 
@@ -142,6 +146,7 @@ cargo run -p rpp --bin rpp -- lower examples/rpp/minimal.rpp
 
 # cargo++ MVP stand-in
 cargo run -p rpp --bin cargo-pp -- pp check -- --workspace
+cargo run -p rpp --bin cargo-pp -- pp ci --report rustpp-report.json
 ```
 
 ## Policy

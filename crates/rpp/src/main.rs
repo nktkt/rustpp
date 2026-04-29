@@ -3,7 +3,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
@@ -29,6 +29,7 @@ fn main() -> ExitCode {
                 }
             }
         }
+        "ci" => ci(args.collect()),
         "check" => rpp_check(args.collect()),
         "test" => run_cargo("test", args.collect()),
         "build" => run_cargo("build", args.collect()),
@@ -64,7 +65,7 @@ fn main() -> ExitCode {
 
 fn print_help() {
     println!(
-        "Rust++ MVP tooling\n\nUSAGE:\n    rpp <command>\n\nCOMMANDS:\n    new <name>                  Create a Rust++ MVP project\n    check [--no-policy] [args]  Enforce policy, then run cargo check\n    test [args...]              Run cargo test\n    build [args...]             Run cargo build\n    audit [path]                Report unsafe usage and unsafe boundaries\n    effects [--deny A,B] [path] Report and optionally deny effects\n    policy [--config F] [path]  Enforce rustpp.toml policy\n    sbom [--json] [Cargo.lock]  Emit a minimal dependency SBOM\n    report [path]               Emit a JSON audit/effect/policy/SBOM report\n    prove [path]                Count contract annotations\n    lower <file.rpp>            Lower Rust++ syntax preview to Rust\n    expand <file>               Print the current lowering view\n"
+        "Rust++ MVP tooling\n\nUSAGE:\n    rpp <command>\n\nCOMMANDS:\n    new <name>                  Create a Rust++ MVP project\n    ci [--report F]             Run policy, check, test, and report\n    check [--no-policy] [args]  Enforce policy, then run cargo check\n    test [args...]              Run cargo test\n    build [args...]             Run cargo build\n    audit [path]                Report unsafe usage and unsafe boundaries\n    effects [--deny A,B] [path] Report and optionally deny effects\n    policy [--config F] [path]  Enforce rustpp.toml policy\n    sbom [--json] [Cargo.lock]  Emit a minimal dependency SBOM\n    report [path]               Emit a JSON audit/effect/policy/SBOM report\n    prove [path]                Count contract annotations\n    lower <file.rpp>            Lower Rust++ syntax preview to Rust\n    expand <file>               Print the current lowering view\n"
     );
 }
 
@@ -79,6 +80,159 @@ fn run_cargo(command: &str, args: Vec<String>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn ci(args: Vec<String>) -> ExitCode {
+    let config = match parse_ci_args(args) {
+        Ok(config) => config,
+        Err(message) => {
+            eprintln!("rpp ci: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match enforce_policy_if_present(&config.root, &config.config_path) {
+        Ok(()) => {}
+        Err(CheckFailure::Policy(exit_code)) => return exit_code,
+        Err(CheckFailure::Io(error)) => {
+            eprintln!("rpp ci: policy check failed: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
+
+    if let Err(exit_code) = run_cargo_step("check", &["--workspace"]) {
+        return exit_code;
+    }
+
+    if let Err(exit_code) = run_cargo_step("test", &["--workspace"]) {
+        return exit_code;
+    }
+
+    if let Err(exit_code) = run_report_step(&config) {
+        return exit_code;
+    }
+
+    println!("rpp ci: passed");
+    ExitCode::SUCCESS
+}
+
+fn parse_ci_args(args: Vec<String>) -> Result<CiConfig, String> {
+    let mut config = CiConfig {
+        root: PathBuf::from("."),
+        config_path: PathBuf::from("rustpp.toml"),
+        lock_path: PathBuf::from("Cargo.lock"),
+        report_path: None,
+    };
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--report" {
+            let Some(value) = args.get(index + 1) else {
+                return Err("--report requires a file path".to_string());
+            };
+            config.report_path = Some(PathBuf::from(value));
+            index += 2;
+        } else if let Some(value) = arg.strip_prefix("--report=") {
+            config.report_path = Some(PathBuf::from(value));
+            index += 1;
+        } else if arg == "--config" {
+            let Some(value) = args.get(index + 1) else {
+                return Err("--config requires a file path".to_string());
+            };
+            config.config_path = PathBuf::from(value);
+            index += 2;
+        } else if let Some(value) = arg.strip_prefix("--config=") {
+            config.config_path = PathBuf::from(value);
+            index += 1;
+        } else if arg == "--lockfile" {
+            let Some(value) = args.get(index + 1) else {
+                return Err("--lockfile requires a file path".to_string());
+            };
+            config.lock_path = PathBuf::from(value);
+            index += 2;
+        } else if let Some(value) = arg.strip_prefix("--lockfile=") {
+            config.lock_path = PathBuf::from(value);
+            index += 1;
+        } else if arg == "--root" {
+            let Some(value) = args.get(index + 1) else {
+                return Err("--root requires a path".to_string());
+            };
+            config.root = PathBuf::from(value);
+            index += 2;
+        } else if let Some(value) = arg.strip_prefix("--root=") {
+            config.root = PathBuf::from(value);
+            index += 1;
+        } else {
+            config.root = PathBuf::from(arg);
+            index += 1;
+        }
+    }
+
+    Ok(config)
+}
+
+fn run_cargo_step(command: &str, args: &[&str]) -> Result<(), ExitCode> {
+    match Command::new("cargo").arg(command).args(args).status() {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(ExitCode::from(status.code().unwrap_or(1) as u8)),
+        Err(error) => {
+            eprintln!("rpp ci: failed to run cargo {command}: {error}");
+            Err(ExitCode::FAILURE)
+        }
+    }
+}
+
+fn run_report_step(config: &CiConfig) -> Result<(), ExitCode> {
+    let Some(report_path) = &config.report_path else {
+        return match report(report_args(config)) {
+            ExitCode::SUCCESS => Ok(()),
+            exit_code => Err(exit_code),
+        };
+    };
+
+    let output = match fs::File::create(report_path) {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!("rpp ci: {}: {error}", report_path.display());
+            return Err(ExitCode::FAILURE);
+        }
+    };
+
+    let current_exe = match env::current_exe() {
+        Ok(current_exe) => current_exe,
+        Err(error) => {
+            eprintln!("rpp ci: could not locate current executable: {error}");
+            return Err(ExitCode::FAILURE);
+        }
+    };
+
+    match Command::new(current_exe)
+        .arg("report")
+        .args(report_args(config))
+        .stdout(Stdio::from(output))
+        .status()
+    {
+        Ok(status) if status.success() => {
+            println!("rpp ci: wrote report to {}", report_path.display());
+            Ok(())
+        }
+        Ok(status) => Err(ExitCode::from(status.code().unwrap_or(1) as u8)),
+        Err(error) => {
+            eprintln!("rpp ci: failed to run report: {error}");
+            Err(ExitCode::FAILURE)
+        }
+    }
+}
+
+fn report_args(config: &CiConfig) -> Vec<String> {
+    vec![
+        config.root.display().to_string(),
+        "--config".to_string(),
+        config.config_path.display().to_string(),
+        "--lockfile".to_string(),
+        config.lock_path.display().to_string(),
+    ]
 }
 
 fn rpp_check(args: Vec<String>) -> ExitCode {
@@ -1454,6 +1608,13 @@ struct PolicyViolation {
     detail: String,
 }
 
+struct CiConfig {
+    root: PathBuf,
+    config_path: PathBuf,
+    lock_path: PathBuf,
+    report_path: Option<PathBuf>,
+}
+
 struct EffectFinding {
     path: PathBuf,
     line: usize,
@@ -1637,6 +1798,25 @@ mod tests {
             parse_string_array("[\"Net\", \"Db\"]", 1).unwrap(),
             ["Net", "Db"]
         );
+    }
+
+    #[test]
+    fn parses_ci_args() {
+        let config = parse_ci_args(vec![
+            "--root".to_string(),
+            "src".to_string(),
+            "--config=policy.toml".to_string(),
+            "--lockfile".to_string(),
+            "Lock.toml".to_string(),
+            "--report".to_string(),
+            "report.json".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(config.root, PathBuf::from("src"));
+        assert_eq!(config.config_path, PathBuf::from("policy.toml"));
+        assert_eq!(config.lock_path, PathBuf::from("Lock.toml"));
+        assert_eq!(config.report_path, Some(PathBuf::from("report.json")));
     }
 
     #[test]
