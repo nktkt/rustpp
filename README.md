@@ -131,6 +131,9 @@ cargo run -p rpp --bin rpp -- policy .
 cargo run -p rpp --bin rpp -- sbom
 cargo run -p rpp --bin rpp -- sbom --json
 
+# Combined JSON report
+cargo run -p rpp --bin rpp -- report .
+
 # Contract inventory
 cargo run -p rpp --bin rpp -- prove .
 
@@ -156,11 +159,10 @@ deny_effects = ["Net"]
 - Expand `.rpp` parsing beyond line-oriented lowering
 - Add structured contract/effect metadata
 - Add richer unsafe boundary reports
-- Emit machine-readable audit reports
+- Expand machine-readable audit reports
 - Grow `rpp prove` from inventory into verifier integration
 - Improve `cargo-pp` into a full `cargo++` workflow
 
 ## License
 
 This project is intended to be licensed under `MIT OR Apache-2.0`.
-

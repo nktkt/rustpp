@@ -35,6 +35,7 @@ fn main() -> ExitCode {
         "effects" => effects(args.collect()),
         "policy" => policy(args.collect()),
         "sbom" => sbom(args.collect()),
+        "report" => report(args.collect()),
         "prove" => prove(args.next().unwrap_or_else(|| ".".to_string())),
         "lower" => lower(args.next()),
         "expand" => expand(args.next()),
@@ -63,7 +64,7 @@ fn main() -> ExitCode {
 
 fn print_help() {
     println!(
-        "Rust++ MVP tooling\n\nUSAGE:\n    rpp <command>\n\nCOMMANDS:\n    new <name>                  Create a Rust++ MVP project\n    check [--no-policy] [args]  Enforce policy, then run cargo check\n    test [args...]              Run cargo test\n    build [args...]             Run cargo build\n    audit [path]                Report unsafe usage and unsafe boundaries\n    effects [--deny A,B] [path] Report and optionally deny effects\n    policy [--config F] [path]  Enforce rustpp.toml policy\n    sbom [--json] [Cargo.lock]  Emit a minimal dependency SBOM\n    prove [path]                Count contract annotations\n    lower <file.rpp>            Lower Rust++ syntax preview to Rust\n    expand <file>               Print the current lowering view\n"
+        "Rust++ MVP tooling\n\nUSAGE:\n    rpp <command>\n\nCOMMANDS:\n    new <name>                  Create a Rust++ MVP project\n    check [--no-policy] [args]  Enforce policy, then run cargo check\n    test [args...]              Run cargo test\n    build [args...]             Run cargo build\n    audit [path]                Report unsafe usage and unsafe boundaries\n    effects [--deny A,B] [path] Report and optionally deny effects\n    policy [--config F] [path]  Enforce rustpp.toml policy\n    sbom [--json] [Cargo.lock]  Emit a minimal dependency SBOM\n    report [path]               Emit a JSON audit/effect/policy/SBOM report\n    prove [path]                Count contract annotations\n    lower <file.rpp>            Lower Rust++ syntax preview to Rust\n    expand <file>               Print the current lowering view\n"
     );
 }
 
@@ -471,6 +472,261 @@ fn sbom(args: Vec<String>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn report(args: Vec<String>) -> ExitCode {
+    let mut root = PathBuf::from(".");
+    let mut config_path = PathBuf::from("rustpp.toml");
+    let mut lock_path = PathBuf::from("Cargo.lock");
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--config" {
+            let Some(value) = args.get(index + 1) else {
+                eprintln!("rpp report: --config requires a file path");
+                return ExitCode::FAILURE;
+            };
+            config_path = PathBuf::from(value);
+            index += 2;
+        } else if let Some(value) = arg.strip_prefix("--config=") {
+            config_path = PathBuf::from(value);
+            index += 1;
+        } else if arg == "--lockfile" {
+            let Some(value) = args.get(index + 1) else {
+                eprintln!("rpp report: --lockfile requires a file path");
+                return ExitCode::FAILURE;
+            };
+            lock_path = PathBuf::from(value);
+            index += 2;
+        } else if let Some(value) = arg.strip_prefix("--lockfile=") {
+            lock_path = PathBuf::from(value);
+            index += 1;
+        } else {
+            root = PathBuf::from(arg);
+            index += 1;
+        }
+    }
+
+    let mut audit_report = AuditReport::default();
+    if let Err(error) = collect_audit_report(&root, &mut audit_report) {
+        eprintln!("rpp report: audit failed: {error}");
+        return ExitCode::FAILURE;
+    }
+
+    let mut effect_findings = Vec::new();
+    if let Err(error) = collect_effect_findings(&root, &mut effect_findings) {
+        eprintln!("rpp report: effect scan failed: {error}");
+        return ExitCode::FAILURE;
+    }
+
+    let mut contract_count = 0usize;
+    if let Err(error) = count_contract_annotations(&root, &mut contract_count) {
+        eprintln!("rpp report: contract scan failed: {error}");
+        return ExitCode::FAILURE;
+    }
+
+    let packages = match fs::read_to_string(&lock_path)
+        .and_then(|source| parse_cargo_lock_packages(&source))
+    {
+        Ok(packages) => packages,
+        Err(error) => {
+            eprintln!("rpp report: {}: {error}", lock_path.display());
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let policy_violations = if config_path.exists() {
+        match load_policy_config(&config_path)
+            .and_then(|config| collect_policy_violations(&root, &config))
+        {
+            Ok(violations) => violations,
+            Err(error) => {
+                eprintln!("rpp report: {}: {error}", config_path.display());
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    let failed = !audit_report.unsafe_findings.is_empty()
+        || !audit_report.metadata_errors.is_empty()
+        || !policy_violations.is_empty();
+
+    print_json_report(
+        &root,
+        &config_path,
+        &lock_path,
+        &audit_report,
+        &effect_findings,
+        &policy_violations,
+        &packages,
+        contract_count,
+        failed,
+    );
+
+    if failed {
+        ExitCode::from(2)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn print_json_report(
+    root: &Path,
+    config_path: &Path,
+    lock_path: &Path,
+    audit_report: &AuditReport,
+    effect_findings: &[EffectFinding],
+    policy_violations: &[PolicyViolation],
+    packages: &[SbomPackage],
+    contract_count: usize,
+    failed: bool,
+) {
+    println!("{{");
+    println!("  \"format\": \"rustpp-report-v0\",");
+    println!(
+        "  \"status\": \"{}\",",
+        if failed { "fail" } else { "pass" }
+    );
+    println!(
+        "  \"root\": \"{}\",",
+        json_escape(&root.display().to_string())
+    );
+    println!(
+        "  \"config\": \"{}\",",
+        json_escape(&config_path.display().to_string())
+    );
+    println!(
+        "  \"lockfile\": \"{}\",",
+        json_escape(&lock_path.display().to_string())
+    );
+    print_json_audit_report(audit_report);
+    print_json_effect_report(effect_findings);
+    print_json_policy_report(policy_violations);
+    println!("  \"contracts\": {{ \"annotations\": {contract_count} }},");
+    print_json_packages(packages);
+    println!("}}");
+}
+
+fn print_json_audit_report(report: &AuditReport) {
+    println!("  \"audit\": {{");
+    println!("    \"unsafe_findings\": [");
+    for (index, finding) in report.unsafe_findings.iter().enumerate() {
+        let comma = if index + 1 == report.unsafe_findings.len() {
+            ""
+        } else {
+            ","
+        };
+        println!(
+            "      {{ \"path\": \"{}\", \"line\": {}, \"text\": \"{}\" }}{}",
+            json_escape(&finding.path.display().to_string()),
+            finding.line,
+            json_escape(finding.text.trim()),
+            comma
+        );
+    }
+    println!("    ],");
+    println!("    \"unsafe_boundaries\": [");
+    for (index, boundary) in report.boundaries.iter().enumerate() {
+        let comma = if index + 1 == report.boundaries.len() {
+            ""
+        } else {
+            ","
+        };
+        println!(
+            "      {{ \"path\": \"{}\", \"line\": {}, \"reason\": \"{}\", \"audit\": \"{}\" }}{}",
+            json_escape(&boundary.path.display().to_string()),
+            boundary.line,
+            json_escape(&boundary.reason),
+            json_escape(&boundary.audit),
+            comma
+        );
+    }
+    println!("    ],");
+    println!("    \"metadata_errors\": [");
+    for (index, finding) in report.metadata_errors.iter().enumerate() {
+        let comma = if index + 1 == report.metadata_errors.len() {
+            ""
+        } else {
+            ","
+        };
+        println!(
+            "      {{ \"path\": \"{}\", \"line\": {}, \"text\": \"{}\" }}{}",
+            json_escape(&finding.path.display().to_string()),
+            finding.line,
+            json_escape(finding.text.trim()),
+            comma
+        );
+    }
+    println!("    ]");
+    println!("  }},");
+}
+
+fn print_json_effect_report(findings: &[EffectFinding]) {
+    println!("  \"effects\": [");
+    for (index, finding) in findings.iter().enumerate() {
+        let comma = if index + 1 == findings.len() { "" } else { "," };
+        println!(
+            "    {{ \"path\": \"{}\", \"line\": {}, \"effects\": [{}] }}{}",
+            json_escape(&finding.path.display().to_string()),
+            finding.line,
+            finding
+                .effects
+                .iter()
+                .map(|effect| format!("\"{}\"", json_escape(effect)))
+                .collect::<Vec<_>>()
+                .join(", "),
+            comma
+        );
+    }
+    println!("  ],");
+}
+
+fn print_json_policy_report(violations: &[PolicyViolation]) {
+    println!("  \"policy\": {{");
+    println!("    \"violations\": [");
+    for (index, violation) in violations.iter().enumerate() {
+        let comma = if index + 1 == violations.len() {
+            ""
+        } else {
+            ","
+        };
+        println!(
+            "      {{ \"kind\": \"{}\", \"path\": \"{}\", \"line\": {}, \"detail\": \"{}\" }}{}",
+            json_escape(&violation.kind),
+            json_escape(&violation.path.display().to_string()),
+            violation.line,
+            json_escape(&violation.detail),
+            comma
+        );
+    }
+    println!("    ]");
+    println!("  }},");
+}
+
+fn print_json_packages(packages: &[SbomPackage]) {
+    println!("  \"sbom\": {{");
+    println!("    \"format\": \"rustpp-sbom-v0\",");
+    println!("    \"packages\": [");
+    for (index, package) in packages.iter().enumerate() {
+        let comma = if index + 1 == packages.len() { "" } else { "," };
+        println!(
+            "      {{ \"name\": \"{}\", \"version\": \"{}\", \"source\": {} }}{}",
+            json_escape(&package.name),
+            json_escape(&package.version),
+            package
+                .source
+                .as_ref()
+                .map(|source| format!("\"{}\"", json_escape(source)))
+                .unwrap_or_else(|| "null".to_string()),
+            comma
+        );
+    }
+    println!("    ]");
+    println!("  }}");
+}
+
 fn print_text_sbom(packages: &[SbomPackage]) {
     println!("rustpp-sbom packages={}", packages.len());
     println!("name\tversion\tsource");
@@ -618,36 +874,51 @@ fn enforce_policy_if_present(root: &Path, config_path: &Path) -> Result<(), Chec
 
 fn enforce_policy(root: &Path, config_path: &Path) -> io::Result<usize> {
     let config = load_policy_config(config_path)?;
-    let mut violations = 0usize;
+    let violations = collect_policy_violations(root, &config)?;
+
+    for violation in &violations {
+        eprintln!(
+            "rpp policy: {} at {}:{}: {}",
+            violation.kind,
+            violation.path.display(),
+            violation.line,
+            violation.detail
+        );
+    }
+
+    Ok(violations.len())
+}
+
+fn collect_policy_violations(
+    root: &Path,
+    config: &PolicyConfig,
+) -> io::Result<Vec<PolicyViolation>> {
+    let mut violations = Vec::new();
 
     if config.deny_unsafe {
         let mut findings = Vec::new();
         collect_audit_findings(root, &mut findings)?;
-        if !findings.is_empty() {
-            violations += findings.len();
-            eprintln!("rpp policy: unsafe usage denied");
-            for finding in findings {
-                eprintln!(
-                    "{}:{}: {}",
-                    finding.path.display(),
-                    finding.line,
-                    finding.text.trim()
-                );
-            }
-        }
+        violations.extend(findings.into_iter().map(|finding| PolicyViolation {
+            kind: "unsafe".to_string(),
+            path: finding.path,
+            line: finding.line,
+            detail: finding.text.trim().to_string(),
+        }));
     }
 
-    let mut effect_findings = Vec::new();
-    collect_effect_findings(root, &mut effect_findings)?;
-    for finding in &effect_findings {
-        for effect in &finding.effects {
-            if config.deny_effects.iter().any(|denied| denied == effect) {
-                violations += 1;
-                eprintln!(
-                    "rpp policy: denied effect `{effect}` at {}:{}",
-                    finding.path.display(),
-                    finding.line
-                );
+    if !config.deny_effects.is_empty() {
+        let mut effect_findings = Vec::new();
+        collect_effect_findings(root, &mut effect_findings)?;
+        for finding in &effect_findings {
+            for effect in &finding.effects {
+                if config.deny_effects.iter().any(|denied| denied == effect) {
+                    violations.push(PolicyViolation {
+                        kind: "effect".to_string(),
+                        path: finding.path.clone(),
+                        line: finding.line,
+                        detail: effect.clone(),
+                    });
+                }
             }
         }
     }
@@ -1174,6 +1445,13 @@ struct UnsafeBoundaryFinding {
     line: usize,
     reason: String,
     audit: String,
+}
+
+struct PolicyViolation {
+    kind: String,
+    path: PathBuf,
+    line: usize,
+    detail: String,
 }
 
 struct EffectFinding {

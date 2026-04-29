@@ -23,6 +23,7 @@ cargo run -p rpp --bin rpp -- effects .
 cargo run -p rpp --bin rpp -- effects --deny Db .
 cargo run -p rpp --bin rpp -- policy .
 cargo run -p rpp --bin rpp -- sbom
+cargo run -p rpp --bin rpp -- report .
 cargo run -p rpp --bin rpp -- lower examples/rpp/minimal.rpp
 cargo run -p rpp --bin rpp -- prove .
 cargo run -p rpp --bin cargo-pp -- pp check -- --workspace
@@ -124,6 +125,23 @@ cargo run -p rpp --bin rpp -- sbom --json
 ```
 
 The MVP SBOM includes package name, version, and source. Workspace packages use `workspace` as their text source and `null` in JSON.
+
+## Combined Report
+
+`rpp report` emits a single JSON document for CI and audit logs. It combines:
+
+- unsafe keyword findings and unsafe boundary metadata
+- effect annotations
+- policy violations
+- contract annotation counts
+- the minimal SBOM
+
+```bash
+cargo run -p rpp --bin rpp -- report .
+cargo run -p rpp --bin cargo-pp -- pp report .
+```
+
+The command exits with status code `2` if unsafe findings, unsafe boundary metadata errors, or policy violations are present.
 
 ## Unsafe Boundary Audit
 

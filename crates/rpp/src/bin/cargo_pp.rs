@@ -31,6 +31,7 @@ fn is_rpp_command(command: &str) -> bool {
             | "new"
             | "policy"
             | "prove"
+            | "report"
             | "sbom"
             | "test"
     )
