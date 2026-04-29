@@ -47,7 +47,7 @@ fn main() -> ExitCode {
 
 fn print_help() {
     println!(
-        "Rust++ MVP tooling\n\nUSAGE:\n    rpp <command>\n\nCOMMANDS:\n    new <name>                  Create a Rust++ MVP project\n    ci [--report F]             Run policy, check, test, and report\n    check [--no-policy] [args]  Enforce policy, then run cargo check\n    test [args...]              Run cargo test\n    build [args...]             Run cargo build\n    audit [--json] [path]       Report unsafe usage and unsafe boundaries\n    effects [--json] [--deny A,B] [path]\n                                Report and optionally deny effects\n    policy [--json] [--config F] [path]\n                                Enforce rustpp.toml policy\n    sbom [--json] [Cargo.lock]  Emit a minimal dependency SBOM\n    report [path]               Emit a JSON audit/effect/policy/SBOM report\n    migrate [--json] [path]     Suggest scan-only Rust++ migration candidates\n    prove [--json] [path]       Inventory contract annotations\n    lower <file.rpp>            Lower Rust++ syntax preview to Rust\n    expand <file>               Print the current lowering view\n"
+        "Rust++ MVP tooling\n\nUSAGE:\n    rpp <command>\n\nCOMMANDS:\n    new <name>                  Create a Rust++ MVP project\n    ci [--report F]             Run policy, check, test, and report\n    check [--no-policy] [args]  Enforce policy, then run cargo check\n    test [args...]              Run cargo test\n    build [args...]             Run cargo build\n    audit [--json] [path]       Report unsafe usage and unsafe boundaries\n    effects [--json] [--deny A,B] [path]\n                                Report and optionally deny effects\n    policy [--json] [--config F] [path]\n                                Enforce rustpp.toml policy\n    sbom [--json] [Cargo.lock]  Emit a minimal dependency SBOM\n    report [--output F] [path]  Emit a JSON audit/effect/policy/SBOM report\n    migrate [--json] [path]     Suggest scan-only Rust++ migration candidates\n    prove [--json] [path]       Inventory contract annotations\n    lower <file.rpp>            Lower Rust++ syntax preview to Rust\n    expand <file>               Print the current lowering view\n"
     );
 }
 
@@ -208,12 +208,16 @@ fn run_report_step(config: &CiConfig) -> Result<(), ExitCode> {
 }
 
 fn report_args(config: &CiConfig) -> Vec<String> {
+    report_args_from_paths(&config.root, &config.config_path, &config.lock_path)
+}
+
+fn report_args_from_paths(root: &Path, config_path: &Path, lock_path: &Path) -> Vec<String> {
     vec![
-        config.root.display().to_string(),
+        root.display().to_string(),
         "--config".to_string(),
-        config.config_path.display().to_string(),
+        config_path.display().to_string(),
         "--lockfile".to_string(),
-        config.lock_path.display().to_string(),
+        lock_path.display().to_string(),
     ]
 }
 
@@ -1169,74 +1173,143 @@ fn sbom(args: Vec<String>) -> ExitCode {
 }
 
 fn report(args: Vec<String>) -> ExitCode {
-    let mut root = PathBuf::from(".");
-    let mut config_path = PathBuf::from("rustpp.toml");
-    let mut lock_path = PathBuf::from("Cargo.lock");
+    let config = match parse_report_args(args) {
+        Ok(config) => config,
+        Err(message) => {
+            eprintln!("rpp report: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if let Some(output_path) = &config.output_path {
+        return write_report_to_file(&config, output_path);
+    }
+
+    emit_report(&config)
+}
+
+fn parse_report_args(args: Vec<String>) -> Result<ReportConfig, String> {
+    let mut config = ReportConfig {
+        root: PathBuf::from("."),
+        config_path: PathBuf::from("rustpp.toml"),
+        lock_path: PathBuf::from("Cargo.lock"),
+        output_path: None,
+    };
     let mut index = 0;
 
     while index < args.len() {
         let arg = &args[index];
         if arg == "--config" {
             let Some(value) = args.get(index + 1) else {
-                eprintln!("rpp report: --config requires a file path");
-                return ExitCode::FAILURE;
+                return Err("--config requires a file path".to_string());
             };
-            config_path = PathBuf::from(value);
+            config.config_path = PathBuf::from(value);
             index += 2;
         } else if let Some(value) = arg.strip_prefix("--config=") {
-            config_path = PathBuf::from(value);
+            config.config_path = PathBuf::from(value);
             index += 1;
         } else if arg == "--lockfile" {
             let Some(value) = args.get(index + 1) else {
-                eprintln!("rpp report: --lockfile requires a file path");
-                return ExitCode::FAILURE;
+                return Err("--lockfile requires a file path".to_string());
             };
-            lock_path = PathBuf::from(value);
+            config.lock_path = PathBuf::from(value);
             index += 2;
         } else if let Some(value) = arg.strip_prefix("--lockfile=") {
-            lock_path = PathBuf::from(value);
+            config.lock_path = PathBuf::from(value);
+            index += 1;
+        } else if arg == "--output" {
+            let Some(value) = args.get(index + 1) else {
+                return Err("--output requires a file path".to_string());
+            };
+            config.output_path = Some(PathBuf::from(value));
+            index += 2;
+        } else if let Some(value) = arg.strip_prefix("--output=") {
+            config.output_path = Some(PathBuf::from(value));
             index += 1;
         } else {
-            root = PathBuf::from(arg);
+            config.root = PathBuf::from(arg);
             index += 1;
         }
     }
 
+    Ok(config)
+}
+
+fn write_report_to_file(config: &ReportConfig, output_path: &Path) -> ExitCode {
+    let output = match fs::File::create(output_path) {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!("rpp report: {}: {error}", output_path.display());
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let current_exe = match env::current_exe() {
+        Ok(current_exe) => current_exe,
+        Err(error) => {
+            eprintln!("rpp report: could not locate current executable: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match Command::new(current_exe)
+        .arg("report")
+        .args(report_args_from_paths(
+            &config.root,
+            &config.config_path,
+            &config.lock_path,
+        ))
+        .stdout(Stdio::from(output))
+        .status()
+    {
+        Ok(status) if status.success() => {
+            println!("rpp report: wrote report to {}", output_path.display());
+            ExitCode::SUCCESS
+        }
+        Ok(status) => ExitCode::from(status.code().unwrap_or(1) as u8),
+        Err(error) => {
+            eprintln!("rpp report: failed to run report: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn emit_report(config: &ReportConfig) -> ExitCode {
     let mut audit_report = AuditReport::default();
-    if let Err(error) = collect_audit_report(&root, &mut audit_report) {
+    if let Err(error) = collect_audit_report(&config.root, &mut audit_report) {
         eprintln!("rpp report: audit failed: {error}");
         return ExitCode::FAILURE;
     }
 
     let mut effect_findings = Vec::new();
-    if let Err(error) = collect_effect_findings(&root, &mut effect_findings) {
+    if let Err(error) = collect_effect_findings(&config.root, &mut effect_findings) {
         eprintln!("rpp report: effect scan failed: {error}");
         return ExitCode::FAILURE;
     }
 
     let mut contract_annotations = Vec::new();
-    if let Err(error) = collect_contract_annotations(&root, &mut contract_annotations) {
+    if let Err(error) = collect_contract_annotations(&config.root, &mut contract_annotations) {
         eprintln!("rpp report: contract scan failed: {error}");
         return ExitCode::FAILURE;
     }
 
-    let packages = match fs::read_to_string(&lock_path)
+    let packages = match fs::read_to_string(&config.lock_path)
         .and_then(|source| parse_cargo_lock_packages(&source))
     {
         Ok(packages) => packages,
         Err(error) => {
-            eprintln!("rpp report: {}: {error}", lock_path.display());
+            eprintln!("rpp report: {}: {error}", config.lock_path.display());
             return ExitCode::FAILURE;
         }
     };
 
-    let policy_violations = if config_path.exists() {
-        match load_policy_config(&config_path)
-            .and_then(|config| collect_policy_violations(&root, &config))
+    let policy_violations = if config.config_path.exists() {
+        match load_policy_config(&config.config_path)
+            .and_then(|policy_config| collect_policy_violations(&config.root, &policy_config))
         {
             Ok(violations) => violations,
             Err(error) => {
-                eprintln!("rpp report: {}: {error}", config_path.display());
+                eprintln!("rpp report: {}: {error}", config.config_path.display());
                 return ExitCode::FAILURE;
             }
         }
@@ -1249,9 +1322,9 @@ fn report(args: Vec<String>) -> ExitCode {
         || !policy_violations.is_empty();
 
     print_json_report(
-        &root,
-        &config_path,
-        &lock_path,
+        &config.root,
+        &config.config_path,
+        &config.lock_path,
         &audit_report,
         &effect_findings,
         &policy_violations,
@@ -2345,6 +2418,13 @@ struct CiConfig {
     report_path: Option<PathBuf>,
 }
 
+struct ReportConfig {
+    root: PathBuf,
+    config_path: PathBuf,
+    lock_path: PathBuf,
+    output_path: Option<PathBuf>,
+}
+
 struct EffectFinding {
     path: PathBuf,
     line: usize,
@@ -2754,6 +2834,24 @@ mod tests {
         assert_eq!(config.config_path, PathBuf::from("policy.toml"));
         assert_eq!(config.lock_path, PathBuf::from("Lock.toml"));
         assert_eq!(config.report_path, Some(PathBuf::from("report.json")));
+    }
+
+    #[test]
+    fn parses_report_args() {
+        let config = parse_report_args(vec![
+            "src".to_string(),
+            "--config".to_string(),
+            "policy.toml".to_string(),
+            "--lockfile=Lock.toml".to_string(),
+            "--output".to_string(),
+            "report.json".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(config.root, PathBuf::from("src"));
+        assert_eq!(config.config_path, PathBuf::from("policy.toml"));
+        assert_eq!(config.lock_path, PathBuf::from("Lock.toml"));
+        assert_eq!(config.output_path, Some(PathBuf::from("report.json")));
     }
 
     #[test]

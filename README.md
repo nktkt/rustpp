@@ -141,6 +141,7 @@ cargo run -p rpp --bin rpp -- sbom --json
 
 # Combined JSON report
 cargo run -p rpp --bin rpp -- report .
+cargo run -p rpp --bin rpp -- report --output rustpp-report.json .
 
 # Scan-only migration suggestions
 cargo run -p rpp --bin rpp -- migrate examples/payment_service

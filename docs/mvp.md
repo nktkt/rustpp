@@ -29,6 +29,7 @@ cargo run -p rpp --bin rpp -- policy .
 cargo run -p rpp --bin rpp -- policy --json .
 cargo run -p rpp --bin rpp -- sbom
 cargo run -p rpp --bin rpp -- report .
+cargo run -p rpp --bin rpp -- report --output rustpp-report.json .
 cargo run -p rpp --bin rpp -- migrate examples/payment_service
 cargo run -p rpp --bin rpp -- migrate --json examples/payment_service
 cargo run -p rpp --bin rpp -- lower examples/rpp/minimal.rpp
@@ -158,10 +159,11 @@ The MVP SBOM includes package name, version, and source. Workspace packages use 
 
 ```bash
 cargo run -p rpp --bin rpp -- report .
+cargo run -p rpp --bin rpp -- report --output rustpp-report.json .
 cargo run -p rpp --bin cargo-pp -- pp report .
 ```
 
-The command exits with status code `2` if unsafe findings, unsafe boundary metadata errors, or policy violations are present.
+The command exits with status code `2` if unsafe findings, unsafe boundary metadata errors, or policy violations are present. Use `--output` to write the JSON document to a file instead of stdout.
 
 ## Contract Inventory
 
