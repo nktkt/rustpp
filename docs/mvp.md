@@ -29,6 +29,7 @@ cargo run -p rpp --bin rpp -- migrate examples/payment_service
 cargo run -p rpp --bin rpp -- migrate --json examples/payment_service
 cargo run -p rpp --bin rpp -- lower examples/rpp/minimal.rpp
 cargo run -p rpp --bin rpp -- prove .
+cargo run -p rpp --bin rpp -- prove --json .
 cargo run -p rpp --bin cargo-pp -- pp check -- --workspace
 cargo run -p rpp --bin cargo-pp -- pp ci --report rustpp-report.json
 ```
@@ -143,7 +144,7 @@ The MVP SBOM includes package name, version, and source. Workspace packages use 
 - unsafe keyword findings and unsafe boundary metadata
 - effect annotations
 - policy violations
-- contract annotation counts
+- contract annotation inventory
 - the minimal SBOM
 
 ```bash
@@ -152,6 +153,17 @@ cargo run -p rpp --bin cargo-pp -- pp report .
 ```
 
 The command exits with status code `2` if unsafe findings, unsafe boundary metadata errors, or policy violations are present.
+
+## Contract Inventory
+
+`rpp prove` is inventory-only in the MVP. It scans `.rs` attributes and `.rpp` metadata for contract annotations, then prints the source location, contract kind, and expression. `--json` emits the same data in `rustpp-prove-v0` format for CI logs or review tooling.
+
+```bash
+cargo run -p rpp --bin rpp -- prove .
+cargo run -p rpp --bin rpp -- prove --json .
+```
+
+Static solver integration is intentionally left for a later Rust++ phase.
 
 ## Migration Scan
 

@@ -37,7 +37,7 @@ fn main() -> ExitCode {
         "policy" => policy(args.collect()),
         "sbom" => sbom(args.collect()),
         "report" => report(args.collect()),
-        "prove" => prove(args.next().unwrap_or_else(|| ".".to_string())),
+        "prove" => prove(args.collect()),
         "lower" => lower(args.next()),
         "expand" => expand(args.next()),
         "new" => match args.next() {
@@ -62,7 +62,7 @@ fn main() -> ExitCode {
 
 fn print_help() {
     println!(
-        "Rust++ MVP tooling\n\nUSAGE:\n    rpp <command>\n\nCOMMANDS:\n    new <name>                  Create a Rust++ MVP project\n    ci [--report F]             Run policy, check, test, and report\n    check [--no-policy] [args]  Enforce policy, then run cargo check\n    test [args...]              Run cargo test\n    build [args...]             Run cargo build\n    audit [path]                Report unsafe usage and unsafe boundaries\n    effects [--deny A,B] [path] Report and optionally deny effects\n    policy [--config F] [path]  Enforce rustpp.toml policy\n    sbom [--json] [Cargo.lock]  Emit a minimal dependency SBOM\n    report [path]               Emit a JSON audit/effect/policy/SBOM report\n    migrate [--json] [path]     Suggest scan-only Rust++ migration candidates\n    prove [path]                Count contract annotations\n    lower <file.rpp>            Lower Rust++ syntax preview to Rust\n    expand <file>               Print the current lowering view\n"
+        "Rust++ MVP tooling\n\nUSAGE:\n    rpp <command>\n\nCOMMANDS:\n    new <name>                  Create a Rust++ MVP project\n    ci [--report F]             Run policy, check, test, and report\n    check [--no-policy] [args]  Enforce policy, then run cargo check\n    test [args...]              Run cargo test\n    build [args...]             Run cargo build\n    audit [path]                Report unsafe usage and unsafe boundaries\n    effects [--deny A,B] [path] Report and optionally deny effects\n    policy [--config F] [path]  Enforce rustpp.toml policy\n    sbom [--json] [Cargo.lock]  Emit a minimal dependency SBOM\n    report [path]               Emit a JSON audit/effect/policy/SBOM report\n    migrate [--json] [path]     Suggest scan-only Rust++ migration candidates\n    prove [--json] [path]       Inventory contract annotations\n    lower <file.rpp>            Lower Rust++ syntax preview to Rust\n    expand <file>               Print the current lowering view\n"
     );
 }
 
@@ -450,14 +450,26 @@ fn is_source_file(path: &Path) -> bool {
         .is_some_and(|ext| matches!(ext, "rs" | "rpp"))
 }
 
-fn prove(root: String) -> ExitCode {
-    let root = Path::new(&root);
-    let mut count = 0usize;
+fn prove(args: Vec<String>) -> ExitCode {
+    let mut root = PathBuf::from(".");
+    let mut json = false;
 
-    match count_contract_annotations(root, &mut count) {
+    for arg in args {
+        if arg == "--json" {
+            json = true;
+        } else {
+            root = PathBuf::from(arg);
+        }
+    }
+
+    let mut annotations = Vec::new();
+    match collect_contract_annotations(&root, &mut annotations) {
         Ok(()) => {
-            println!("rpp prove: found {count} contract annotation(s)");
-            println!("rpp prove: static solver integration is planned after the MVP");
+            if json {
+                print_json_contract_inventory(&annotations);
+            } else {
+                print_text_contract_inventory(&annotations);
+            }
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -962,8 +974,8 @@ fn report(args: Vec<String>) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let mut contract_count = 0usize;
-    if let Err(error) = count_contract_annotations(&root, &mut contract_count) {
+    let mut contract_annotations = Vec::new();
+    if let Err(error) = collect_contract_annotations(&root, &mut contract_annotations) {
         eprintln!("rpp report: contract scan failed: {error}");
         return ExitCode::FAILURE;
     }
@@ -1004,7 +1016,7 @@ fn report(args: Vec<String>) -> ExitCode {
         &effect_findings,
         &policy_violations,
         &packages,
-        contract_count,
+        &contract_annotations,
         failed,
     );
 
@@ -1024,7 +1036,7 @@ fn print_json_report(
     effect_findings: &[EffectFinding],
     policy_violations: &[PolicyViolation],
     packages: &[SbomPackage],
-    contract_count: usize,
+    contract_annotations: &[ContractAnnotation],
     failed: bool,
 ) {
     println!("{{");
@@ -1048,7 +1060,7 @@ fn print_json_report(
     print_json_audit_report(audit_report);
     print_json_effect_report(effect_findings);
     print_json_policy_report(policy_violations);
-    println!("  \"contracts\": {{ \"annotations\": {contract_count} }},");
+    print_json_contract_report(contract_annotations);
     print_json_packages(packages);
     println!("}}");
 }
@@ -1553,7 +1565,10 @@ fn is_identifier(value: &str) -> bool {
         && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
-fn count_contract_annotations(path: &Path, count: &mut usize) -> io::Result<()> {
+fn collect_contract_annotations(
+    path: &Path,
+    annotations: &mut Vec<ContractAnnotation>,
+) -> io::Result<()> {
     if should_skip(path) {
         return Ok(());
     }
@@ -1561,7 +1576,7 @@ fn count_contract_annotations(path: &Path, count: &mut usize) -> io::Result<()> 
     let metadata = fs::metadata(path)?;
     if metadata.is_dir() {
         for entry in fs::read_dir(path)? {
-            count_contract_annotations(&entry?.path(), count)?;
+            collect_contract_annotations(&entry?.path(), annotations)?;
         }
         return Ok(());
     }
@@ -1569,9 +1584,11 @@ fn count_contract_annotations(path: &Path, count: &mut usize) -> io::Result<()> 
     if is_source_file(path) {
         let source = fs::read_to_string(path)?;
         let allow_rpp_metadata = path.extension().and_then(OsStr::to_str) == Some("rpp");
-        for line in source.lines() {
-            if is_contract_annotation_line(line, allow_rpp_metadata) {
-                *count += 1;
+        for (index, line) in source.lines().enumerate() {
+            if let Some(mut annotation) = parse_contract_annotation_line(line, allow_rpp_metadata) {
+                annotation.path = path.to_path_buf();
+                annotation.line = index + 1;
+                annotations.push(annotation);
             }
         }
     }
@@ -1579,17 +1596,140 @@ fn count_contract_annotations(path: &Path, count: &mut usize) -> io::Result<()> 
     Ok(())
 }
 
-fn is_contract_annotation_line(line: &str, allow_rpp_metadata: bool) -> bool {
+fn parse_contract_annotation_line(
+    line: &str,
+    allow_rpp_metadata: bool,
+) -> Option<ContractAnnotation> {
     let trimmed = line.trim_start();
-    trimmed.starts_with("#[requires")
-        || trimmed.starts_with("#[ensures")
-        || trimmed.starts_with("#[contract")
-        || (allow_rpp_metadata
-            && (trimmed.starts_with("requires ")
-                || trimmed.starts_with("requires(")
-                || trimmed.starts_with("ensures ")
-                || trimmed.starts_with("ensures(")
-                || trimmed.starts_with("contract type ")))
+
+    if let Some(expression) = parse_attribute_condition(trimmed, "requires") {
+        return Some(contract_annotation("requires", expression, trimmed));
+    }
+
+    if let Some(expression) = parse_attribute_condition(trimmed, "ensures") {
+        return Some(contract_annotation("ensures", expression, trimmed));
+    }
+
+    if let Some(expression) = parse_attribute_condition(trimmed, "invariant") {
+        return Some(contract_annotation("invariant", expression, trimmed));
+    }
+
+    if is_marker_attribute(trimmed, "contract") {
+        return Some(contract_annotation("contract", "", trimmed));
+    }
+
+    if !allow_rpp_metadata {
+        return None;
+    }
+
+    if let Some(expression) = strip_condition(trimmed, "requires") {
+        return Some(contract_annotation("requires", expression, trimmed));
+    }
+
+    if let Some(expression) = strip_condition(trimmed, "ensures") {
+        return Some(contract_annotation("ensures", expression, trimmed));
+    }
+
+    if let Some(expression) = strip_condition(trimmed, "invariant") {
+        return Some(contract_annotation("invariant", expression, trimmed));
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("contract type ") {
+        let expression = rest.trim().trim_end_matches(';').trim();
+        return Some(contract_annotation("contract-type", expression, trimmed));
+    }
+
+    None
+}
+
+fn parse_attribute_condition<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+    let rest = line.strip_prefix("#[")?;
+    let rest = rest.strip_prefix(name)?;
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix('(')?;
+    let close = rest.rfind(')')?;
+    Some(rest[..close].trim())
+}
+
+fn is_marker_attribute(line: &str, name: &str) -> bool {
+    line == format!("#[{name}]") || line.starts_with(&format!("#[{name}("))
+}
+
+fn contract_annotation(kind: &str, expression: &str, source: &str) -> ContractAnnotation {
+    ContractAnnotation {
+        path: PathBuf::new(),
+        line: 0,
+        kind: kind.to_string(),
+        expression: expression.to_string(),
+        source: source.to_string(),
+    }
+}
+
+fn print_text_contract_inventory(annotations: &[ContractAnnotation]) {
+    println!(
+        "rpp prove: found {} contract annotation(s)",
+        annotations.len()
+    );
+
+    for annotation in annotations {
+        if annotation.expression.is_empty() {
+            println!(
+                "{}:{}: [{}] {}",
+                annotation.path.display(),
+                annotation.line,
+                annotation.kind,
+                annotation.source
+            );
+        } else {
+            println!(
+                "{}:{}: [{}] {}",
+                annotation.path.display(),
+                annotation.line,
+                annotation.kind,
+                annotation.expression
+            );
+        }
+    }
+
+    println!("rpp prove: static solver integration is planned after the MVP");
+}
+
+fn print_json_contract_inventory(annotations: &[ContractAnnotation]) {
+    println!("{{");
+    println!("  \"format\": \"rustpp-prove-v0\",");
+    println!("  \"mode\": \"inventory-only\",");
+    println!("  \"annotations\": [");
+    print_json_contract_items(annotations, "    ");
+    println!("  ]");
+    println!("}}");
+}
+
+fn print_json_contract_report(annotations: &[ContractAnnotation]) {
+    println!("  \"contracts\": {{");
+    println!("    \"annotations\": {},", annotations.len());
+    println!("    \"items\": [");
+    print_json_contract_items(annotations, "      ");
+    println!("    ]");
+    println!("  }},");
+}
+
+fn print_json_contract_items(annotations: &[ContractAnnotation], indent: &str) {
+    for (index, annotation) in annotations.iter().enumerate() {
+        let comma = if index + 1 == annotations.len() {
+            ""
+        } else {
+            ","
+        };
+        println!(
+            "{indent}{{ \"path\": \"{}\", \"line\": {}, \"kind\": \"{}\", \"expression\": \"{}\", \"source\": \"{}\" }}{}",
+            json_escape(&annotation.path.display().to_string()),
+            annotation.line,
+            json_escape(&annotation.kind),
+            json_escape(&annotation.expression),
+            json_escape(&annotation.source),
+            comma
+        );
+    }
 }
 
 fn expand(path: Option<String>) -> ExitCode {
@@ -1905,6 +2045,15 @@ struct MigrationFinding {
     kind: String,
     detail: String,
     suggestion: String,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ContractAnnotation {
+    path: PathBuf,
+    line: usize,
+    kind: String,
+    expression: String,
+    source: String,
 }
 
 struct CiConfig {
@@ -2240,20 +2389,95 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
     }
 
     #[test]
-    fn counts_rpp_contract_annotations() {
-        assert!(is_contract_annotation_line(
-            "contract type PositiveMoney = i64 where |value| *value > 0;",
-            true
-        ));
-        assert!(is_contract_annotation_line("    requires amount > 0", true));
-        assert!(is_contract_annotation_line(
-            "    ensures(result.is_ok())",
-            true
-        ));
-        assert!(!is_contract_annotation_line(
-            "    requires amount > 0",
-            false
-        ));
+    fn parses_rpp_contract_annotations() {
+        assert_eq!(
+            parse_contract_annotation_line(
+                "contract type PositiveMoney = i64 where |value| *value > 0;",
+                true
+            )
+            .unwrap()
+            .kind,
+            "contract-type"
+        );
+        assert_eq!(
+            parse_contract_annotation_line("    requires amount > 0", true)
+                .unwrap()
+                .expression,
+            "amount > 0"
+        );
+        assert_eq!(
+            parse_contract_annotation_line("    ensures(result.is_ok())", true)
+                .unwrap()
+                .expression,
+            "result.is_ok()"
+        );
+        assert!(parse_contract_annotation_line("    requires amount > 0", false).is_none());
+    }
+
+    #[test]
+    fn parses_rust_contract_attributes() {
+        assert_eq!(
+            parse_contract_annotation_line("#[requires(value > 0)]", false)
+                .unwrap()
+                .expression,
+            "value > 0"
+        );
+        assert_eq!(
+            parse_contract_annotation_line("#[ensures(result.is_ok())]", false)
+                .unwrap()
+                .kind,
+            "ensures"
+        );
+        assert_eq!(
+            parse_contract_annotation_line("#[contract]", false)
+                .unwrap()
+                .kind,
+            "contract"
+        );
+        assert!(parse_contract_annotation_line("#[contractual]", false).is_none());
+        assert!(parse_contract_annotation_line("#[component]", false).is_none());
+    }
+
+    #[test]
+    fn inventories_contract_annotations_from_file() {
+        let root = env::temp_dir().join(format!("rustpp-contract-test-{}", std::process::id()));
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join("lib.rs"),
+            "#[contract]\nimpl App {\n    #[requires(value > 0)]\n    fn double(value: i32) -> i32 { value * 2 }\n}\n",
+        )
+        .unwrap();
+
+        let mut annotations = Vec::new();
+        collect_contract_annotations(&root, &mut annotations).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(annotations.len(), 2);
+        assert!(
+            annotations
+                .iter()
+                .any(|annotation| annotation.kind == "contract")
+        );
+        assert!(
+            annotations
+                .iter()
+                .any(|annotation| annotation.expression == "value > 0")
+        );
+    }
+
+    #[test]
+    fn legacy_rpp_contract_examples_still_match() {
+        assert!(
+            parse_contract_annotation_line(
+                "contract type PositiveMoney = i64 where |value| *value > 0;",
+                true
+            )
+            .is_some()
+        );
+        assert!(parse_contract_annotation_line("    requires amount > 0", true).is_some());
+        assert!(parse_contract_annotation_line("    ensures(result.is_ok())", true).is_some());
+        assert!(parse_contract_annotation_line("    requires amount > 0", false).is_none());
     }
 
     #[test]

@@ -144,6 +144,7 @@ cargo run -p rpp --bin rpp -- migrate --json examples/payment_service
 
 # Contract inventory
 cargo run -p rpp --bin rpp -- prove .
+cargo run -p rpp --bin rpp -- prove --json .
 
 # .rpp lowering preview
 cargo run -p rpp --bin rpp -- lower examples/rpp/minimal.rpp
