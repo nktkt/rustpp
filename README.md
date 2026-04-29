@@ -162,7 +162,10 @@ cargo run -p rpp --bin cargo-pp -- pp ci --report rustpp-report.json
 [policy]
 deny_unsafe = true
 deny_effects = ["Net"]
+min_contract_annotations = 1
 ```
+
+`min_contract_annotations` makes CI fail if the scanned tree drops below the configured contract inventory floor.
 
 ## Roadmap
 

@@ -1379,6 +1379,23 @@ fn collect_policy_violations(
         }
     }
 
+    if config.min_contract_annotations > 0 {
+        let mut annotations = Vec::new();
+        collect_contract_annotations(root, &mut annotations)?;
+        if annotations.len() < config.min_contract_annotations {
+            violations.push(PolicyViolation {
+                kind: "contract".to_string(),
+                path: root.to_path_buf(),
+                line: 1,
+                detail: format!(
+                    "contract annotations {} below required minimum {}",
+                    annotations.len(),
+                    config.min_contract_annotations
+                ),
+            });
+        }
+    }
+
     Ok(violations)
 }
 
@@ -1402,6 +1419,9 @@ fn load_policy_config(path: &Path) -> io::Result<PolicyConfig> {
         match key.trim() {
             "deny_unsafe" => config.deny_unsafe = parse_bool(value.trim(), index + 1)?,
             "deny_effects" => config.deny_effects = parse_string_array(value.trim(), index + 1)?,
+            "min_contract_annotations" => {
+                config.min_contract_annotations = parse_usize(value.trim(), index + 1)?
+            }
             key => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -1423,6 +1443,15 @@ fn parse_bool(value: &str, line: usize) -> io::Result<bool> {
             format!("line {line}: expected boolean"),
         )),
     }
+}
+
+fn parse_usize(value: &str, line: usize) -> io::Result<usize> {
+    value.parse::<usize>().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("line {line}: expected non-negative integer"),
+        )
+    })
 }
 
 fn parse_string_array(value: &str, line: usize) -> io::Result<Vec<String>> {
@@ -1973,7 +2002,8 @@ fn create_project(name: &str) -> ExitCode {
         "[package]\nname = \"{package_name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nstdpp = {{ path = \"../crates/stdpp\" }}\n"
     );
     let main_rs = "use stdpp::prelude::*;\n\n#[component]\nstruct App;\n\n#[contract]\nimpl App {\n    #[requires(value > 0)]\n    fn double(&self, value: i32) -> i32 {\n        value * 2\n    }\n}\n\nfn main() {\n    let app = App;\n    println!(\"{}\", app.double(21));\n}\n";
-    let policy = "[policy]\ndeny_unsafe = true\ndeny_effects = [\"Net\"]\n";
+    let policy =
+        "[policy]\ndeny_unsafe = true\ndeny_effects = [\"Net\"]\nmin_contract_annotations = 1\n";
 
     if let Err(error) = fs::write(root.join("Cargo.toml"), manifest) {
         eprintln!("rpp new: {error}");
@@ -2098,6 +2128,7 @@ enum CheckFailure {
 struct PolicyConfig {
     deny_unsafe: bool,
     deny_effects: Vec<String>,
+    min_contract_annotations: usize,
 }
 
 fn contains_unsafe_keyword(line: &str) -> bool {
@@ -2246,6 +2277,51 @@ mod tests {
             parse_string_array("[\"Net\", \"Db\"]", 1).unwrap(),
             ["Net", "Db"]
         );
+    }
+
+    #[test]
+    fn parses_policy_contract_minimum() {
+        let root =
+            env::temp_dir().join(format!("rustpp-policy-config-test-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let config_path = root.join("rustpp.toml");
+        fs::write(
+            &config_path,
+            "[policy]\ndeny_unsafe = true\ndeny_effects = [\"Net\"]\nmin_contract_annotations = 2\n",
+        )
+        .unwrap();
+
+        let config = load_policy_config(&config_path).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        assert!(config.deny_unsafe);
+        assert_eq!(config.deny_effects, ["Net"]);
+        assert_eq!(config.min_contract_annotations, 2);
+    }
+
+    #[test]
+    fn policy_flags_missing_contract_inventory() {
+        let root = env::temp_dir().join(format!(
+            "rustpp-policy-contract-test-{}",
+            std::process::id()
+        ));
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join("lib.rs"),
+            "pub fn double(value: i32) -> i32 { value * 2 }\n",
+        )
+        .unwrap();
+
+        let config = PolicyConfig {
+            min_contract_annotations: 1,
+            ..PolicyConfig::default()
+        };
+        let violations = collect_policy_violations(&root, &config).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].kind, "contract");
     }
 
     #[test]

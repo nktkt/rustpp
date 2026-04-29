@@ -1,3 +1,4 @@
 [policy]
 deny_unsafe = true
 deny_effects = ["Net"]
+min_contract_annotations = 1

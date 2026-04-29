@@ -8,7 +8,7 @@ This repository implements the first Rust++ slice as an opt-in Rust workspace:
 - `examples/payment_service`: a minimal component/contract/effect example
 - `examples/rpp/minimal.rpp`: a minimal `.rpp` lowering example
 - `examples/unsafe_boundary.rs`: a sample unsafe boundary metadata annotation
-- `rustpp.toml`: a minimal policy file for unsafe and effect checks
+- `rustpp.toml`: a minimal policy file for unsafe, effect, and contract inventory checks
 
 The MVP intentionally lowers to normal Rust. The contract macros currently generate debug assertions for preconditions and simple postconditions.
 
@@ -122,9 +122,10 @@ If a denied effect is present, the command exits with status code `2`, which is 
 [policy]
 deny_unsafe = true
 deny_effects = ["Net"]
+min_contract_annotations = 1
 ```
 
-The MVP parser intentionally supports only these two keys. That keeps the policy format small while still making generated code and CI checks explicit.
+The MVP parser intentionally supports only these keys. That keeps the policy format small while still making generated code and CI checks explicit. `min_contract_annotations` fails the policy check when the scanned source tree has fewer contract annotations than the configured minimum.
 
 ## SBOM
 
